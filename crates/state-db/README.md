@@ -33,6 +33,17 @@ db.set_head_block(65_000_000)?;
 let head = db.get_head_block()?;
 ```
 
+## Iteration
+
+Cursor-based enumeration of all entries in a table:
+
+```rust
+let accounts: Vec<(Address, AccountInfo)> = db.iter_accounts()?;
+let storage: Vec<(Address, B256, U256)> = db.iter_storage()?;
+```
+
+Useful for validation, export, and sampling workflows.
+
 ## Batch Writes
 
 `WriteBatch` groups multiple writes into a single atomic libmdbx transaction. If not explicitly committed, the batch rolls back on drop.

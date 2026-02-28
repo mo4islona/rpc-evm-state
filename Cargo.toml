@@ -43,3 +43,4 @@ evm-state-api = { path = "crates/api" }
 evm-state-client = { path = "crates/client" }
 evm-state-sqd-fetcher = { path = "crates/sqd-fetcher" }
 evm-state-snapshot = { path = "crates/snapshot" }
+evm-state-validation = { path = "crates/validation" }

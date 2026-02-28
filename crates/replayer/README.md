@@ -4,6 +4,8 @@ Replays EVM blocks against a [`StateDb`](../state-db) to reconstruct state. Exec
 
 ## How it works
 
+![replay_block() diagram](doc/replay-block.svg)
+
 1. A `CacheDB` overlay wraps the `StateDb` as a read-only backing store.
 2. Each transaction gets a fresh EVM context (clean journal), but the `CacheDB` persists across transactions so state changes accumulate within the block.
 3. After all transactions execute, the `CacheDB` cache is flushed to `StateDb` in a single atomic `WriteBatch`.
@@ -27,6 +29,8 @@ for (i, tx) in result.tx_results.iter().enumerate() {
 ```
 
 ## Pipeline
+
+![run_pipeline() diagram](doc/pipeline.svg)
 
 The `pipeline` module provides `run_pipeline()` for replaying a sequence of blocks from any async `Stream<Item = Result<Block, E>>`. This decouples block sourcing (e.g. from the SQD fetcher) from replay logic.
 

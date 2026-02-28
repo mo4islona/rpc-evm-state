@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 520" font-family="Inter, -apple-system, system-ui, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#3b82f6"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="520" rx="8" fill="#fafbfc"/>
+
+  <!-- Title -->
+  <text x="410" y="32" text-anchor="middle" font-size="16" font-weight="700" fill="#1e293b">replay_block() — Single Block Execution</text>
+
+  <!-- ─── Block input (top-left) — from SQD ─── -->
+  <rect x="20" y="60" width="180" height="150" rx="6" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="110" y="82" text-anchor="middle" font-size="12" font-weight="600" fill="#1e40af">Block N</text>
+  <text x="110" y="96" text-anchor="middle" font-size="9" fill="#94a3b8">from SqdFetcher stream</text>
+  <line x1="40" y1="103" x2="180" y2="103" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="42" y="120" font-size="11" fill="#475569">header  (number, miner, ...)</text>
+  <text x="42" y="138" font-size="11" fill="#475569">tx&#8320;  from &#8594; to, data</text>
+  <text x="42" y="156" font-size="11" fill="#475569">tx&#8321;  from &#8594; to, data</text>
+  <text x="42" y="174" font-size="11" fill="#475569">tx&#8322;  from &#8594; to, data</text>
+  <text x="42" y="198" font-size="10" fill="#94a3b8">evm-state-data-types::Block</text>
+
+  <!-- ─── ChainSpec input (bottom-left) ─── -->
+  <rect x="20" y="230" width="180" height="56" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="110" y="252" text-anchor="middle" font-size="11" font-weight="600" fill="#ea580c">ChainSpec</text>
+  <text x="110" y="268" text-anchor="middle" font-size="9" fill="#9a3412">hardfork schedule &#8594; SpecId</text>
+  <text x="110" y="280" text-anchor="middle" font-size="9" fill="#9a3412">chain_id, block_env, tx_env</text>
+
+  <!-- Arrow: Block → CacheDB zone -->
+  <line x1="200" y1="135" x2="248" y2="135" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Arrow: ChainSpec → CacheDB zone -->
+  <line x1="200" y1="258" x2="248" y2="200" stroke="#ea580c" stroke-width="1.2" marker-end="url(#arrow-orange)"/>
+
+  <!-- ─── CacheDB zone (center) ─── -->
+  <rect x="255" y="55" width="330" height="310" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="420" y="76" text-anchor="middle" font-size="12" font-weight="600" fill="#166534">CacheDB overlay  (persists across txs)</text>
+
+  <!-- TX 0 -->
+  <rect x="275" y="92" width="290" height="60" rx="5" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
+  <text x="285" y="110" font-size="11" font-weight="600" fill="#1e293b">TX 0</text>
+  <text x="285" y="126" font-size="10" fill="#64748b">fresh EVM context &#8594; execute &#8594; result&#8320;</text>
+  <text x="285" y="142" font-size="10" fill="#16a34a">cache_db.commit(state_changes&#8320;)</text>
+
+  <!-- Arrow between TXs -->
+  <line x1="420" y1="152" x2="420" y2="166" stroke="#16a34a" stroke-width="1.2" marker-end="url(#arrow-green)"/>
+  <text x="432" y="163" font-size="9" fill="#16a34a">state accumulates</text>
+
+  <!-- TX 1 -->
+  <rect x="275" y="170" width="290" height="60" rx="5" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
+  <text x="285" y="188" font-size="11" font-weight="600" fill="#1e293b">TX 1</text>
+  <text x="285" y="204" font-size="10" fill="#64748b">fresh EVM context &#8594; execute &#8594; result&#8321;</text>
+  <text x="285" y="220" font-size="10" fill="#16a34a">cache_db.commit(state_changes&#8321;)</text>
+
+  <!-- Arrow between TXs -->
+  <line x1="420" y1="230" x2="420" y2="244" stroke="#16a34a" stroke-width="1.2" marker-end="url(#arrow-green)"/>
+  <text x="432" y="241" font-size="9" fill="#16a34a">state accumulates</text>
+
+  <!-- TX 2 -->
+  <rect x="275" y="248" width="290" height="60" rx="5" fill="#ffffff" stroke="#d1d5db" stroke-width="1"/>
+  <text x="285" y="266" font-size="11" font-weight="600" fill="#1e293b">TX 2</text>
+  <text x="285" y="282" font-size="10" fill="#64748b">fresh EVM context &#8594; execute &#8594; result&#8322;</text>
+  <text x="285" y="298" font-size="10" fill="#16a34a">cache_db.commit(state_changes&#8322;)</text>
+
+  <!-- Read arrow: CacheDB → StateDb (miss) -->
+  <text x="420" y="348" text-anchor="middle" font-size="10" fill="#64748b">cache miss &#8594; read from StateDb</text>
+  <line x1="420" y1="353" x2="420" y2="398" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow-blue)"/>
+
+  <!-- ─── StateDb (bottom center) ─── -->
+  <rect x="305" y="400" width="230" height="50" rx="6" fill="#eef2ff" stroke="#a5b4fc" stroke-width="1.5"/>
+  <text x="420" y="422" text-anchor="middle" font-size="12" font-weight="600" fill="#3730a3">StateDb  (libmdbx)</text>
+  <text x="420" y="440" text-anchor="middle" font-size="10" fill="#6366f1">accounts | storage | code | metadata</text>
+
+  <!-- ─── flush_cache_to_db arrow ─── -->
+  <rect x="255" y="464" width="330" height="36" rx="5" fill="#fef3c7" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="420" y="487" text-anchor="middle" font-size="11" font-weight="600" fill="#92400e">flush_cache_to_db() &#8594; atomic WriteBatch</text>
+
+  <!-- Arrow from CacheDB zone to flush -->
+  <line x1="586" y1="330" x2="620" y2="330" stroke="#64748b" stroke-width="1"/>
+  <line x1="620" y1="330" x2="620" y2="482" stroke="#64748b" stroke-width="1"/>
+  <line x1="620" y1="482" x2="588" y2="482" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Arrow from flush to StateDb -->
+  <line x1="420" y1="464" x2="420" y2="454" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ─── Output (right) ─── -->
+  <rect x="620" y="60" width="180" height="130" rx="6" fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.5"/>
+  <text x="710" y="82" text-anchor="middle" font-size="12" font-weight="600" fill="#7c3aed">BlockResult</text>
+  <line x1="640" y1="90" x2="780" y2="90" stroke="#d8b4fe" stroke-width="1"/>
+  <text x="642" y="108" font-size="11" fill="#475569">block_number: N</text>
+  <text x="642" y="128" font-size="11" fill="#475569">tx_results:</text>
+  <text x="654" y="146" font-size="10" fill="#16a34a">0: gas=21000  &#10003;</text>
+  <text x="654" y="162" font-size="10" fill="#16a34a">1: gas=45231  &#10003;</text>
+  <text x="654" y="178" font-size="10" fill="#ef4444">2: gas=31000  &#10007; revert</text>
+
+  <!-- Arrow: CacheDB zone → Output -->
+  <line x1="585" y1="105" x2="617" y2="105" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Key insight callout -->
+  <rect x="620" y="220" width="185" height="80" rx="5" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="632" y="240" font-size="10" font-weight="600" fill="#9a3412">Key invariants:</text>
+  <text x="632" y="257" font-size="10" fill="#78350f">&#8226; TX N sees TX 0..N-1 writes</text>
+  <text x="632" y="272" font-size="10" fill="#78350f">&#8226; All-or-nothing commit</text>
+  <text x="632" y="287" font-size="10" fill="#78350f">&#8226; head_block set atomically</text>
+</svg>

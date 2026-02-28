@@ -1,0 +1,18 @@
+[package]
+name = "evm-state-validation"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+evm-state-db = { workspace = true }
+evm-state-common = { workspace = true }
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+axum = { workspace = true }
+tokio = { workspace = true }

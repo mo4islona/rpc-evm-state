@@ -129,6 +129,45 @@ impl StateDb {
         Ok(deleted)
     }
 
+    // ── Iteration ──────────────────────────────────────────────────────
+
+    /// Collect all accounts as `(Address, AccountInfo)` pairs.
+    pub fn iter_accounts(&self) -> Result<Vec<(Address, AccountInfo)>> {
+        let txn = self.db.begin_ro_txn()?;
+        let table = txn.open_table(Some(TABLE_ACCOUNTS))?;
+        let mut cursor = txn.cursor(&table)?;
+        let mut result = Vec::new();
+        for item in cursor.iter_start::<Vec<u8>, Vec<u8>>() {
+            let (key_bytes, val_bytes) = item?;
+            if key_bytes.len() != 20 {
+                continue;
+            }
+            let address = Address::from_slice(&key_bytes);
+            let info = AccountInfo::from_bytes(&val_bytes)?;
+            result.push((address, info));
+        }
+        Ok(result)
+    }
+
+    /// Collect all storage entries as `(Address, B256, U256)` triples.
+    pub fn iter_storage(&self) -> Result<Vec<(Address, B256, U256)>> {
+        let txn = self.db.begin_ro_txn()?;
+        let table = txn.open_table(Some(TABLE_STORAGE))?;
+        let mut cursor = txn.cursor(&table)?;
+        let mut result = Vec::new();
+        for item in cursor.iter_start::<Vec<u8>, Vec<u8>>() {
+            let (key_bytes, val_bytes) = item?;
+            if key_bytes.len() != 52 || val_bytes.len() != 32 {
+                continue;
+            }
+            let address = Address::from_slice(&key_bytes[..20]);
+            let slot = B256::from_slice(&key_bytes[20..52]);
+            let value = U256::from_be_bytes::<32>(val_bytes.as_slice().try_into().unwrap());
+            result.push((address, slot, value));
+        }
+        Ok(result)
+    }
+
     // ── Batch write ───────────────────────────────────────────────────
 
     /// Begin a batch write. All operations on the returned `WriteBatch` are
@@ -772,5 +811,70 @@ mod tests {
             db.get_storage(&addr_b, &slot).unwrap().unwrap(),
             U256::from(222u64)
         );
+    }
+
+    // ── Iteration ─────────────────────────────────────────────────────
+
+    #[test]
+    fn iter_accounts_returns_all() {
+        let (_dir, db) = tmp_db();
+        let addr_a = address!("0000000000000000000000000000000000000001");
+        let addr_b = address!("0000000000000000000000000000000000000002");
+        let addr_c = address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
+
+        let info_a = AccountInfo { nonce: 1, balance: U256::from(100u64), code_hash: B256::ZERO };
+        let info_b = AccountInfo { nonce: 2, balance: U256::from(200u64), code_hash: B256::ZERO };
+        let info_c = AccountInfo { nonce: 42, balance: U256::from(1_000_000u64), code_hash: B256::ZERO };
+
+        db.set_account(&addr_a, &info_a).unwrap();
+        db.set_account(&addr_b, &info_b).unwrap();
+        db.set_account(&addr_c, &info_c).unwrap();
+
+        let accounts = db.iter_accounts().unwrap();
+        assert_eq!(accounts.len(), 3);
+
+        // Verify all accounts are present (order is lexicographic by address bytes).
+        let map: std::collections::HashMap<Address, AccountInfo> = accounts.into_iter().collect();
+        assert_eq!(map[&addr_a], info_a);
+        assert_eq!(map[&addr_b], info_b);
+        assert_eq!(map[&addr_c], info_c);
+    }
+
+    #[test]
+    fn iter_accounts_empty_db() {
+        let (_dir, db) = tmp_db();
+        let accounts = db.iter_accounts().unwrap();
+        assert!(accounts.is_empty());
+    }
+
+    #[test]
+    fn iter_storage_returns_all() {
+        let (_dir, db) = tmp_db();
+        let addr_a = address!("0000000000000000000000000000000000000001");
+        let addr_b = address!("0000000000000000000000000000000000000002");
+        let slot_0 = B256::ZERO;
+        let slot_1 = b256!("0000000000000000000000000000000000000000000000000000000000000001");
+
+        db.set_storage(&addr_a, &slot_0, &U256::from(10u64)).unwrap();
+        db.set_storage(&addr_a, &slot_1, &U256::from(20u64)).unwrap();
+        db.set_storage(&addr_b, &slot_0, &U256::from(30u64)).unwrap();
+
+        let entries = db.iter_storage().unwrap();
+        assert_eq!(entries.len(), 3);
+
+        // Check all entries present.
+        let has = |addr: &Address, slot: &B256, val: U256| {
+            entries.iter().any(|(a, s, v)| a == addr && s == slot && *v == val)
+        };
+        assert!(has(&addr_a, &slot_0, U256::from(10u64)));
+        assert!(has(&addr_a, &slot_1, U256::from(20u64)));
+        assert!(has(&addr_b, &slot_0, U256::from(30u64)));
+    }
+
+    #[test]
+    fn iter_storage_empty_db() {
+        let (_dir, db) = tmp_db();
+        let entries = db.iter_storage().unwrap();
+        assert!(entries.is_empty());
     }
 }
