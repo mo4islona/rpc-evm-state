@@ -24,3 +24,4 @@ anyhow = "1"
 evm-state-common = { path = "crates/common" }
 evm-state-data-types = { path = "crates/data-types" }
 evm-state-db = { path = "crates/state-db" }
+evm-state-chain-spec = { path = "crates/chain-spec" }

@@ -1,0 +1,16 @@
+[package]
+name = "evm-state-replayer"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+evm-state-common = { workspace = true }
+evm-state-data-types = { workspace = true }
+evm-state-db = { workspace = true }
+evm-state-chain-spec = { workspace = true }
+alloy-primitives = { workspace = true }
+revm = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

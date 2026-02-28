@@ -1103,6 +1103,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "evm-state-replayer"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "evm-state-chain-spec",
+ "evm-state-common",
+ "evm-state-data-types",
+ "evm-state-db",
+ "revm",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
