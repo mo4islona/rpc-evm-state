@@ -6,6 +6,11 @@
       "sourceType": "github",
       "computedHash": "0742312a0de5eb6bd84e093c1815b1db98126130b92713ea5fc2cf902338aa3b"
     },
+    "domain-embedded": {
+      "source": "zhanghandong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "3d32e5d2d602f775f4a3d6bc0222d56526ec0dbc882771c80430dffdc2be6dd2"
+    },
     "m01-ownership": {
       "source": "zhanghandong/rust-skills",
       "sourceType": "github",
@@ -35,6 +40,16 @@
       "source": "zhanghandong/rust-skills",
       "sourceType": "github",
       "computedHash": "ce0ed9b5b5c12775c6c04423c79c8a542638629237ad2447a3c6569accf1a15a"
+    },
+    "m10-performance": {
+      "source": "zhanghandong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "c0e093f630ec71079aa7a138af376821e3cc24dfb129f7162e82d854e26a1087"
+    },
+    "m15-anti-pattern": {
+      "source": "zhanghandong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "d9f5d80bd2ab49f063a61d90a96100298788ea0e1e5bd5e917be3c7e124078a2"
     },
     "product-acceptance-criteria": {
       "source": "subsquid/ai-coding-skills",
