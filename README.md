@@ -114,8 +114,10 @@ db_path = "./polygon.mdbx"
 chain_id = 137
 listen = "0.0.0.0:3000"
 portal = "https://portal.sqd.dev"
-rpc_url = "https://polygon-rpc.com"
+rpc_url = "https://polygon-rpc.com"  # only needed for `validate` subcommand
 ```
+
+All fields are optional. `rpc_url` is only used by `evm-state validate` to spot-check local state against an archive RPC node.
 
 ## Client Usage
 
@@ -187,6 +189,41 @@ packages/
 | POST | `/v1/batch` | Multiple queries in one request |
 | POST | `/v1/prefetch` | Execute call + return state slice |
 | WS | `/v1/stream` | Interactive WebSocket queries |
+
+## Benchmarks
+
+The `bench` crate includes a Criterion-based benchmarking suite that measures state service performance and optionally compares against a traditional JSON-RPC endpoint.
+
+### Scenarios
+
+| Scenario | Description |
+|----------|-------------|
+| **Single call** | One `eth_call` via the prefetch endpoint (TrustServer and Verify modes) |
+| **100 parallel reads** | 100 sequential storage/account reads via RemoteDB |
+| **200-tick Uniswap scan** | Single prefetch reading 200 storage slots vs. 200 individual RPC calls |
+
+### Running
+
+```sh
+# Criterion benchmarks (HTML reports in target/criterion/)
+cargo bench -p evm-state-bench
+
+# Markdown report with p50/p95/p99 percentiles
+cargo run --release -p evm-state-bench --bin report
+
+# Compare against an external RPC
+RPC_URL=https://polygon-rpc.com cargo run --release -p evm-state-bench --bin report
+```
+
+The report outputs a markdown table with latency percentiles and speedup factors:
+
+```
+| Scenario       | Service p50 | Service p95 | Service p99 | RPC p50  | RPC p99  | Speedup |
+|----------------|-------------|-------------|-------------|----------|----------|---------|
+| Single call    | 1.2ms       | 2.5ms       | 3.7ms       | 45.6ms   | 67.8ms   | 37.1x   |
+| 100 reads      | 12.3ms      | 25.6ms      | 38.9ms      | —        | —        | —       |
+| 200-tick scan  | 5.6ms       | 11.2ms      | 18.9ms      | 234.5ms  | 456.7ms  | 41.9x   |
+```
 
 ## Supported Networks
 
