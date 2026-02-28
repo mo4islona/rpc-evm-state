@@ -1,0 +1,13 @@
+[package]
+name = "evm-state-db"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+evm-state-common = { workspace = true }
+alloy-primitives = { workspace = true }
+thiserror = { workspace = true }
+libmdbx = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
