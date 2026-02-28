@@ -62,7 +62,7 @@ Steps are grouped by **dependency tier** — everything within the same tier can
 ### Step 8: HTTP API — Batch Endpoint
 **Crate**: `crates/api` (extend)
 **Scope**: `POST /v1/batch` endpoint accepting a JSON array of `{type: "storage"|"account"|"code", addr, slot?}` requests. Returns array of results in the same order. Single DB transaction for all reads.
-**Tests**: Batch of mixed storage/account/code reads, empty batch, batch with some missing keys (partial results), large batch (1000 items), malformed items in batch.
+**Tests**: Batch of mixed storage/  account/code reads, empty batch, batch with some missing keys (partial results), large batch (1000 items), malformed items in batch.
 **Depends on**: Step 7
 
 ---

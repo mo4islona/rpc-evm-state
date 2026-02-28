@@ -21,6 +21,10 @@ axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
+# HTTP client
+ureq = { version = "3", features = ["json"] }
+lru = "0.14"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
@@ -31,3 +35,4 @@ evm-state-data-types = { path = "crates/data-types" }
 evm-state-db = { path = "crates/state-db" }
 evm-state-chain-spec = { path = "crates/chain-spec" }
 evm-state-api = { path = "crates/api" }
+evm-state-client = { path = "crates/client" }
