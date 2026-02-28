@@ -89,15 +89,21 @@ enum Command {
         file: PathBuf,
     },
 
+    /// Export the state database to a JSON Lines snapshot.
+    Export {
+        /// Output path (.jsonl or .jsonl.zst for compressed).
+        file: PathBuf,
+    },
+
     /// Validate local state against a remote Ethereum RPC.
     Validate {
         /// Ethereum JSON-RPC URL.
         #[arg(long, env = "EVM_STATE_RPC")]
         rpc_url: Option<String>,
 
-        /// Number of random samples to check.
+        /// Number of random accounts/slots to sample and compare.
         #[arg(long, default_value = "100")]
-        count: usize,
+        samples: usize,
     },
 }
 
@@ -260,11 +266,38 @@ fn run_import(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+fn run_export(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
+    let db = evm_state_db::StateDb::open(&resolved.db_path)
+        .with_context(|| format!("failed to open database at {}", resolved.db_path))?;
+
+    info!(file = %file.display(), db = %resolved.db_path, "exporting snapshot");
+
+    let stats = evm_state_snapshot::export_snapshot(&db, file, |progress| {
+        if progress.entries_written % 100_000 == 0 && progress.entries_written > 0 {
+            info!(
+                entries = progress.entries_written,
+                "export progress"
+            );
+        }
+    })?;
+
+    info!(
+        accounts = stats.accounts,
+        storage_slots = stats.storage_slots,
+        code_entries = stats.code_entries,
+        head_block = stats.head_block.unwrap_or(0),
+        elapsed = ?stats.elapsed,
+        "export complete"
+    );
+
+    Ok(())
+}
+
 fn run_validate(
     resolved: &Resolved,
     config: &Config,
     rpc_url: Option<String>,
-    count: usize,
+    samples: usize,
 ) -> Result<()> {
     let rpc_url = rpc_url
         .or_else(|| config.rpc_url.clone())
@@ -277,10 +310,10 @@ fn run_validate(
         .get_head_block()?
         .context("database has no head block; import or replay first")?;
 
-    info!(rpc = %rpc_url, block = head, count = count, "starting validation");
+    info!(rpc = %rpc_url, block = head, samples = samples, "starting validation");
 
     let rpc = evm_state_validation::EthRpcClient::new(&rpc_url);
-    let report = evm_state_validation::validate_random(&db, &rpc, count, head)?;
+    let report = evm_state_validation::validate_random(&db, &rpc, samples, head)?;
 
     info!(
         total = report.total_checks(),
@@ -351,7 +384,8 @@ async fn main() -> Result<()> {
             to,
         } => run_replay(&resolved, &config, portal, dataset, from, to).await,
         Command::Import { file } => run_import(&resolved, &file),
-        Command::Validate { rpc_url, count } => run_validate(&resolved, &config, rpc_url, count),
+        Command::Export { file } => run_export(&resolved, &file),
+        Command::Validate { rpc_url, samples } => run_validate(&resolved, &config, rpc_url, samples),
     }
 }
 
@@ -468,12 +502,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_export() {
+        let cli = Cli::try_parse_from(["evm-state", "export", "/tmp/snapshot.jsonl.zst"]).unwrap();
+        match cli.command {
+            Command::Export { file } => assert_eq!(file, PathBuf::from("/tmp/snapshot.jsonl.zst")),
+            _ => panic!("expected Export"),
+        }
+    }
+
+    #[test]
+    fn parse_export_missing_file_fails() {
+        assert!(Cli::try_parse_from(["evm-state", "export"]).is_err());
+    }
+
+    #[test]
     fn parse_validate_defaults() {
         let cli = Cli::try_parse_from(["evm-state", "validate"]).unwrap();
         match cli.command {
-            Command::Validate { rpc_url, count } => {
+            Command::Validate { rpc_url, samples } => {
                 assert!(rpc_url.is_none());
-                assert_eq!(count, 100);
+                assert_eq!(samples, 100);
             }
             _ => panic!("expected Validate"),
         }
@@ -486,15 +534,15 @@ mod tests {
             "validate",
             "--rpc-url",
             "https://polygon-rpc.com",
-            "--count",
+            "--samples",
             "50",
         ])
         .unwrap();
 
         match cli.command {
-            Command::Validate { rpc_url, count } => {
+            Command::Validate { rpc_url, samples } => {
                 assert_eq!(rpc_url.as_deref(), Some("https://polygon-rpc.com"));
-                assert_eq!(count, 50);
+                assert_eq!(samples, 50);
             }
             _ => panic!("expected Validate"),
         }

@@ -9,6 +9,7 @@ Unified CLI binary for the EVM State-as-a-Service system. Provides a single `evm
 | `evm-state serve` | Start the HTTP API server |
 | `evm-state replay` | Run the block replay pipeline from the SQD Network |
 | `evm-state import <file>` | Import a JSON Lines snapshot into the database |
+| `evm-state export <file>` | Export the state database to a JSON Lines snapshot |
 | `evm-state validate` | Validate local state against a remote Ethereum RPC |
 
 ## Global Options
@@ -63,8 +64,11 @@ evm-state --chain-id 1 replay --from 19000000 --to 19001000
 # Import a snapshot
 evm-state import snapshot.jsonl.zst
 
+# Export state to a snapshot
+evm-state export snapshot.jsonl.zst
+
 # Validate against an RPC (50 random samples)
-evm-state validate --rpc-url https://polygon-rpc.com --count 50
+evm-state validate --rpc-url https://polygon-rpc.com --samples 50
 
 # Use a config file
 evm-state --config config.toml serve

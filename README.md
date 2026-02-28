@@ -44,8 +44,11 @@ evm-state --db ./polygon.mdbx replay --from 65000000
 # Start the API server
 evm-state --db ./polygon.mdbx serve --listen 0.0.0.0:3000
 
+# Export state to a snapshot (plain or zstd-compressed)
+evm-state --db ./polygon.mdbx export snapshot.jsonl.zst
+
 # Validate state against an archive RPC
-evm-state --db ./polygon.mdbx validate --rpc-url https://polygon-rpc.com --count 100
+evm-state --db ./polygon.mdbx validate --rpc-url https://polygon-rpc.com --samples 100
 ```
 
 ## Configuration
@@ -159,21 +162,26 @@ The `bench` crate includes a Criterion-based benchmarking suite that measures st
 # Criterion benchmarks (HTML reports in target/criterion/)
 cargo bench -p evm-state-bench
 
-# Markdown report with p50/p95/p99 percentiles
+# Markdown report (default: 100 iterations)
 cargo run --release -p evm-state-bench --bin report
 
-# Compare against an external RPC
-RPC_URL=https://polygon-rpc.com cargo run --release -p evm-state-bench --bin report
+# Custom iteration count
+cargo run --release -p evm-state-bench --bin report -- -i 500
+
+# Compare against an external RPC (slow — each iteration makes real RPC calls, start with -i 1)
+RPC_URL=https://polygon-rpc.com cargo run --release -p evm-state-bench --bin report -- -i 1
 ```
 
-The report outputs a markdown table with latency percentiles and speedup factors:
+Sample output:
 
 ```
-| Scenario       | Service p50 | Service p95 | Service p99 | RPC p50  | RPC p99  | Speedup |
-|----------------|-------------|-------------|-------------|----------|----------|---------|
-| Single call    | 1.2ms       | 2.5ms       | 3.7ms       | 45.6ms   | 67.8ms   | 37.1x   |
-| 100 reads      | 12.3ms      | 25.6ms      | 38.9ms      | —        | —        | —       |
-| 200-tick scan  | 5.6ms       | 11.2ms      | 18.9ms      | 234.5ms  | 456.7ms  | 41.9x   |
+  EVM State Service - Benchmark Report
+
+    Scenario       Service p50  Service p95  Service p99     RPC p50     RPC p99   Speedup
+    -------------  -----------  -----------  -----------  ----------  ----------  --------
+    Single call          232µs        232µs        232µs    314.27ms    314.27ms   1351.0x
+    100 reads           8.08ms       8.08ms       8.08ms  28711.97ms  28711.97ms   3554.6x
+    200-tick scan       5.27ms       5.27ms       5.27ms  57664.53ms  57664.53ms  10934.7x
 ```
 
 ## Supported Networks

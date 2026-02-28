@@ -168,6 +168,23 @@ impl StateDb {
         Ok(result)
     }
 
+    /// Collect all code entries as `(B256, Vec<u8>)` pairs (code_hash, bytecode).
+    pub fn iter_code(&self) -> Result<Vec<(B256, Vec<u8>)>> {
+        let txn = self.db.begin_ro_txn()?;
+        let table = txn.open_table(Some(TABLE_CODE))?;
+        let mut cursor = txn.cursor(&table)?;
+        let mut result = Vec::new();
+        for item in cursor.iter_start::<Vec<u8>, Vec<u8>>() {
+            let (key_bytes, val_bytes) = item?;
+            if key_bytes.len() != 32 {
+                continue;
+            }
+            let code_hash = B256::from_slice(&key_bytes);
+            result.push((code_hash, val_bytes.to_vec()));
+        }
+        Ok(result)
+    }
+
     // ── Batch write ───────────────────────────────────────────────────
 
     /// Begin a batch write. All operations on the returned `WriteBatch` are

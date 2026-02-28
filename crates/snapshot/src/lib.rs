@@ -1,9 +1,9 @@
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use alloy_primitives::{Bytes, Address, B256, U256};
+use alloy_primitives::{hex, Bytes, Address, B256, U256};
 use evm_state_common::AccountInfo;
 use evm_state_db::StateDb;
 use serde::Deserialize;
@@ -192,6 +192,108 @@ pub fn import_snapshot(
         entries_imported: line_num - skip_lines,
         bytes_read,
     });
+
+    stats.elapsed = start.elapsed();
+    Ok(stats)
+}
+
+// ── Export types ──────────────────────────────────────────────────
+
+/// Progress information passed to the callback during export.
+#[derive(Debug, Clone)]
+pub struct ExportProgress {
+    /// Total entries written so far.
+    pub entries_written: u64,
+}
+
+/// Summary statistics from a completed export.
+#[derive(Debug, Clone)]
+pub struct ExportStats {
+    pub accounts: u64,
+    pub storage_slots: u64,
+    pub code_entries: u64,
+    pub head_block: Option<u64>,
+    pub elapsed: Duration,
+}
+
+// ── Export function ────────────────────────────────────────────────
+
+/// Export the entire state database to a JSON Lines file.
+///
+/// Supports plain `.jsonl` and zstd-compressed `.jsonl.zst` output
+/// (detected by file extension).
+pub fn export_snapshot(
+    db: &StateDb,
+    path: &Path,
+    mut on_progress: impl FnMut(&ExportProgress),
+) -> Result<ExportStats> {
+    let start = Instant::now();
+
+    let file = File::create(path)?;
+    let mut writer: Box<dyn Write> = if has_zst_extension(path) {
+        Box::new(zstd::Encoder::new(file, 3)?.auto_finish())
+    } else {
+        Box::new(std::io::BufWriter::new(file))
+    };
+
+    let mut stats = ExportStats {
+        accounts: 0,
+        storage_slots: 0,
+        code_entries: 0,
+        head_block: None,
+        elapsed: Duration::ZERO,
+    };
+    let mut entries_written: u64 = 0;
+
+    // Accounts
+    for (address, info) in db.iter_accounts()? {
+        writeln!(
+            writer,
+            r#"{{"type":"account","address":"0x{:x}","nonce":{},"balance":"0x{:x}","codeHash":"0x{}"}}"#,
+            address, info.nonce, info.balance, info.code_hash
+        )?;
+        stats.accounts += 1;
+        entries_written += 1;
+        if entries_written % 100_000 == 0 {
+            on_progress(&ExportProgress { entries_written });
+        }
+    }
+
+    // Storage
+    for (address, slot, value) in db.iter_storage()? {
+        writeln!(
+            writer,
+            r#"{{"type":"storage","address":"0x{:x}","slot":"0x{}","value":"0x{}"}}"#,
+            address, slot, value
+        )?;
+        stats.storage_slots += 1;
+        entries_written += 1;
+        if entries_written % 100_000 == 0 {
+            on_progress(&ExportProgress { entries_written });
+        }
+    }
+
+    // Code
+    for (code_hash, bytecode) in db.iter_code()? {
+        writeln!(
+            writer,
+            r#"{{"type":"code","codeHash":"0x{}","bytecode":"0x{}"}}"#,
+            code_hash,
+            hex::encode(&bytecode)
+        )?;
+        stats.code_entries += 1;
+        entries_written += 1;
+    }
+
+    // Metadata
+    if let Some(head) = db.get_head_block()? {
+        writeln!(writer, r#"{{"type":"metadata","headBlock":{}}}"#, head)?;
+        stats.head_block = Some(head);
+    }
+
+    writer.flush()?;
+
+    on_progress(&ExportProgress { entries_written });
 
     stats.elapsed = start.elapsed();
     Ok(stats)
