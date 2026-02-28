@@ -6,62 +6,9 @@ State is populated by replaying blocks from the [Subsquid Network](https://docs.
 
 ## Architecture
 
-```
-                         ┌──────────────────────────────────────────────┐
-                         │              State Population                │
-                         │                                              │
-                         │  ┌──────────────┐      ┌─────────────────┐  │
-                         │  │ SQD Network  │      │ Snapshot (.zst) │  │
-                         │  │  (data lake) │      │                 │  │
-                         │  └──────┬───────┘      └────────┬────────┘  │
-                         │         │                       │           │
-                         │         ▼                       ▼           │
-                         │  ┌──────────────┐      ┌─────────────────┐  │
-                         │  │   Replayer   │      │    Importer     │  │
-                         │  │  (revm exec) │      │  (JSON Lines)   │  │
-                         │  └──────┬───────┘      └────────┬────────┘  │
-                         │         │                       │           │
-                         │         ▼                       ▼           │
-                         │  ┌──────────────────────────────────────┐   │
-                         │  │        State Database (libmdbx)      │   │
-                         │  │  accounts │ storage │ code │ metadata│   │
-                         │  └──────────────────┬───────────────────┘   │
-                         └─────────────────────┼───────────────────────┘
-                                               │
-                         ┌─────────────────────┼───────────────────────┐
-                         │       State Serving │(HTTP + WebSocket)     │
-                         │                     ▼                       │
-                         │  ┌──────────────────────────────────────┐   │
-                         │  │          API Server (axum)           │   │
-                         │  │  /v1/head    /v1/account   /v1/code  │   │
-                         │  │  /v1/storage /v1/batch  /v1/prefetch │   │
-                         │  │  /v1/stream (WebSocket)              │   │
-                         │  └──────────────────┬───────────────────┘   │
-                         └─────────────────────┼───────────────────────┘
-                                               │
-               ┌───────────────────────────────┼──────────────────────────┐
-               │           Client Layer        │                          │
-               │                               ▼                          │
-               │  ┌─────────────────────────────────────────────────────┐ │
-               │  │              Prefetch (1 round-trip)                │ │
-               │  │  Server executes call, records state accesses,     │ │
-               │  │  returns result + state slice + access list        │ │
-               │  └─────────────────────┬───────────────────────────────┘ │
-               │                        │                                 │
-               │          ┌─────────────┴─────────────┐                   │
-               │          ▼                           ▼                   │
-               │  ┌──────────────┐           ┌──────────────┐            │
-               │  │ TrustServer  │           │    Verify    │            │
-               │  │ (use result) │           │ (re-execute  │            │
-               │  │              │           │  with revm)  │            │
-               │  └──────────────┘           └──────────────┘            │
-               │                                                          │
-               │  Available as:                                           │
-               │    Rust client  │  WASM module  │  TypeScript SDK       │
-               │                 │  (browser/    │  (@sqd/evm-state)     │
-               │                 │   Node.js)    │  + viem transport     │
-               └──────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="Architecture diagram" width="800"/>
+</p>
 
 ## How It Works
 
@@ -71,6 +18,10 @@ State is populated by replaying blocks from the [Subsquid Network](https://docs.
 2. **Snapshot import** — A pre-built state dump (JSON Lines, optionally zstd-compressed) is loaded directly into the database, then incremental replay continues from the snapshot's head block.
 
 **Serving a client call** (e.g. `balanceOf`):
+
+<p align="center">
+  <img src="docs/call-flow.svg" alt="Client call flow" width="780"/>
+</p>
 
 1. Client sends `POST /v1/prefetch` with `{to, calldata}`.
 2. Server executes the call with revm using an inspector that records every `SLOAD`, `BALANCE`, and `EXTCODE*` access.
