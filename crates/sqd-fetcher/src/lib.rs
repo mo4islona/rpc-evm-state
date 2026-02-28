@@ -647,4 +647,51 @@ mod tests {
             "expected clear error about JSON array, got: {msg}"
         );
     }
+
+    // ── Integration test against the real SQD portal ──────────────
+
+    /// Fetches a real block with transactions from the public SQD portal
+    /// and verifies all required fields deserialize correctly. This catches
+    /// mismatches between our query fields and the Block/Transaction structs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // requires network — run with: cargo test -p evm-state-sqd-fetcher -- --ignored
+    async fn portal_returns_all_required_fields() {
+        let fetcher = SqdFetcher::new(DEFAULT_PORTAL, POLYGON_DATASET);
+
+        // Block 65_000_000 has 3 transactions (matches our fixture).
+        let blocks: Vec<Block> = fetcher
+            .stream_blocks(65_000_000, Some(65_000_000))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("portal response should deserialize without errors");
+
+        assert_eq!(blocks.len(), 1, "expected exactly 1 block");
+        let block = &blocks[0];
+
+        // Header required fields.
+        assert_eq!(block.header.number, 65_000_000);
+        assert!(block.header.hash.is_some(), "hash missing");
+        assert!(block.header.parent_hash.is_some(), "parentHash missing");
+        assert!(block.header.timestamp.is_some(), "timestamp missing");
+        assert!(block.header.gas_limit.is_some(), "gasLimit missing");
+        assert!(block.header.gas_used.is_some(), "gasUsed missing");
+        assert!(block.header.miner.is_some(), "miner missing");
+
+        // Transactions — block 65M has many txs; just verify they all parsed.
+        assert!(!block.transactions.is_empty(), "expected transactions");
+        for (i, tx) in block.transactions.iter().enumerate() {
+            assert_eq!(
+                tx.transaction_index, i as u32,
+                "transactionIndex mismatch for tx {i}"
+            );
+            assert!(tx.hash.is_some(), "tx {i}: hash missing");
+            assert!(tx.from.is_some(), "tx {i}: from missing");
+            assert!(tx.gas.is_some(), "tx {i}: gas missing");
+            assert!(tx.gas_used.is_some(), "tx {i}: gasUsed missing");
+            assert!(tx.status.is_some(), "tx {i}: status missing");
+            assert!(tx.tx_type.is_some(), "tx {i}: type missing");
+        }
+    }
 }

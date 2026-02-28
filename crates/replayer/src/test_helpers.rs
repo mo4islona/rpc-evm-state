@@ -58,7 +58,7 @@ pub(crate) fn simple_tx(
         from: Some(from),
         to,
         input: Some(input),
-        value: Some(HexU64::from(0u64)),
+        value: Some(alloy_primitives::U256::ZERO),
         nonce: Some(0),
         gas: Some(HexU64::from(1_000_000u64)),
         gas_price: Some(HexU64::from(0u64)),

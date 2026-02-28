@@ -102,7 +102,7 @@ pub struct Transaction {
     pub input: Option<Bytes>,
 
     #[serde(default)]
-    pub value: Option<HexU64>,
+    pub value: Option<alloy_primitives::U256>,
 
     #[serde(default)]
     pub nonce: Option<u64>,
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(tx.status.unwrap(), 1);
         assert_eq!(tx.chain_id.unwrap(), 137);
         assert_eq!(tx.y_parity.unwrap(), 1);
-        assert_eq!(tx.value.unwrap().as_u64(), 0);
+        assert_eq!(tx.value.unwrap(), alloy_primitives::U256::ZERO);
 
         // EIP-1559 fields present
         assert!(tx.max_fee_per_gas.is_some());

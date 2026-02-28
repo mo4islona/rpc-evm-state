@@ -330,7 +330,7 @@ mod tests {
         db.set_account(&sender, &AccountInfo { nonce: 0, balance: U256::from(1_000_000_000u64), code_hash: B256::ZERO }).unwrap();
 
         let mut tx = simple_tx(0, sender, Some(receiver), Bytes::new());
-        tx.value = Some(evm_state_data_types::HexU64::from(500_000u64));
+        tx.value = Some(U256::from(500_000u64));
 
         let block = simple_block(500, vec![tx]);
         let result = replay_block(&db, &block, &spec).unwrap();
