@@ -55,6 +55,7 @@ evm-state-data-types = { path = "crates/data-types" }
 evm-state-db = { path = "crates/state-db" }
 evm-state-chain-spec = { path = "crates/chain-spec" }
 evm-state-api = { path = "crates/api" }
+evm-state-replayer = { path = "crates/replayer" }
 evm-state-client = { path = "crates/client" }
 evm-state-sqd-fetcher = { path = "crates/sqd-fetcher" }
 evm-state-snapshot = { path = "crates/snapshot" }
