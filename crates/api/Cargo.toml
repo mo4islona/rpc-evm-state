@@ -6,7 +6,9 @@ edition.workspace = true
 [dependencies]
 evm-state-db = { workspace = true }
 evm-state-common = { workspace = true }
+evm-state-chain-spec = { workspace = true }
 alloy-primitives = { workspace = true }
+revm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }

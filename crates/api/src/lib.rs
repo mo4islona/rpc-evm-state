@@ -1,14 +1,31 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use alloy_primitives::{hex, Address, B256};
+use alloy_primitives::{hex, Address, Bytes, B256, U256};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use evm_state_chain_spec::ChainSpec;
 use evm_state_db::StateDb;
+use revm::context::TxEnv;
+use revm::database_interface::WrapDatabaseRef;
+use revm::primitives::TxKind;
+use revm::{Context, InspectEvm, MainBuilder};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
+
+mod inspector;
+use inspector::AccessListInspector;
+
+// ── Shared state ────────────────────────────────────────────────────
+
+/// Shared application state provided to all handlers.
+pub struct AppState {
+    pub db: StateDb,
+    pub chain_spec: ChainSpec,
+}
 
 // ── Error handling ──────────────────────────────────────────────────
 
@@ -75,17 +92,17 @@ fn parse_b256(s: &str) -> Result<B256, AppError> {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-async fn get_head(State(db): State<Arc<StateDb>>) -> AppResult<impl IntoResponse> {
-    let head = db.get_head_block()?.ok_or(AppError::NotFound)?;
+async fn get_head(State(state): State<Arc<AppState>>) -> AppResult<impl IntoResponse> {
+    let head = state.db.get_head_block()?.ok_or(AppError::NotFound)?;
     Ok(Json(HeadResponse { head_block: head }))
 }
 
 async fn get_account(
-    State(db): State<Arc<StateDb>>,
+    State(state): State<Arc<AppState>>,
     Path(addr): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let address = parse_address(&addr)?;
-    let info = db.get_account(&address)?.ok_or(AppError::NotFound)?;
+    let info = state.db.get_account(&address)?.ok_or(AppError::NotFound)?;
     Ok(Json(AccountResponse {
         nonce: info.nonce,
         balance: format!("{:#x}", info.balance),
@@ -94,24 +111,30 @@ async fn get_account(
 }
 
 async fn get_storage(
-    State(db): State<Arc<StateDb>>,
+    State(state): State<Arc<AppState>>,
     Path((addr, slot)): Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
     let address = parse_address(&addr)?;
     let slot = parse_b256(&slot)?;
-    let value = db.get_storage(&address, &slot)?.ok_or(AppError::NotFound)?;
+    let value = state
+        .db
+        .get_storage(&address, &slot)?
+        .ok_or(AppError::NotFound)?;
     Ok(Json(StorageResponse {
         value: format!("{:#x}", value),
     }))
 }
 
 async fn get_code(
-    State(db): State<Arc<StateDb>>,
+    State(state): State<Arc<AppState>>,
     Path(addr): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let address = parse_address(&addr)?;
-    let info = db.get_account(&address)?.ok_or(AppError::NotFound)?;
-    let code = db.get_code(&info.code_hash)?.ok_or(AppError::NotFound)?;
+    let info = state.db.get_account(&address)?.ok_or(AppError::NotFound)?;
+    let code = state
+        .db
+        .get_code(&info.code_hash)?
+        .ok_or(AppError::NotFound)?;
     Ok(Json(CodeResponse {
         code: format!("0x{}", hex::encode(&code)),
     }))
@@ -138,17 +161,17 @@ enum BatchResult {
 }
 
 async fn post_batch(
-    State(db): State<Arc<StateDb>>,
+    State(state): State<Arc<AppState>>,
     Json(items): Json<Vec<BatchItem>>,
 ) -> AppResult<impl IntoResponse> {
     let results: Vec<BatchResult> = items
         .iter()
         .map(|item| match item {
             BatchItem::Account { addr } => {
-                let address = addr.parse::<Address>().map_err(|_| {
-                    format!("invalid address: {addr}")
-                })?;
-                match db.get_account(&address) {
+                let address = addr
+                    .parse::<Address>()
+                    .map_err(|_| format!("invalid address: {addr}"))?;
+                match state.db.get_account(&address) {
                     Ok(Some(info)) => Ok(BatchResult::Account(AccountResponse {
                         nonce: info.nonce,
                         balance: format!("{:#x}", info.balance),
@@ -159,13 +182,13 @@ async fn post_batch(
                 }
             }
             BatchItem::Storage { addr, slot } => {
-                let address = addr.parse::<Address>().map_err(|_| {
-                    format!("invalid address: {addr}")
-                })?;
-                let slot = slot.parse::<B256>().map_err(|_| {
-                    format!("invalid slot: {slot}")
-                })?;
-                match db.get_storage(&address, &slot) {
+                let address = addr
+                    .parse::<Address>()
+                    .map_err(|_| format!("invalid address: {addr}"))?;
+                let slot = slot
+                    .parse::<B256>()
+                    .map_err(|_| format!("invalid slot: {slot}"))?;
+                match state.db.get_storage(&address, &slot) {
                     Ok(Some(value)) => Ok(BatchResult::Storage(StorageResponse {
                         value: format!("{:#x}", value),
                     })),
@@ -174,15 +197,15 @@ async fn post_batch(
                 }
             }
             BatchItem::Code { addr } => {
-                let address = addr.parse::<Address>().map_err(|_| {
-                    format!("invalid address: {addr}")
-                })?;
-                let info = match db.get_account(&address) {
+                let address = addr
+                    .parse::<Address>()
+                    .map_err(|_| format!("invalid address: {addr}"))?;
+                let info = match state.db.get_account(&address) {
                     Ok(Some(info)) => info,
                     Ok(None) => return Ok(BatchResult::NotFound { error: "not found" }),
                     Err(e) => return Err(e.to_string()),
                 };
-                match db.get_code(&info.code_hash) {
+                match state.db.get_code(&info.code_hash) {
                     Ok(Some(code)) => Ok(BatchResult::Code(CodeResponse {
                         code: format!("0x{}", hex::encode(&code)),
                     })),
@@ -200,20 +223,195 @@ async fn post_batch(
     Ok(Json(results))
 }
 
+// ── Prefetch endpoint ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PrefetchRequest {
+    to: String,
+    #[serde(default)]
+    data: Option<String>,
+    from: Option<String>,
+    value: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AccessListEntry {
+    address: String,
+    slots: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PrefetchAccountInfo {
+    nonce: u64,
+    balance: String,
+    code_hash: String,
+}
+
+#[derive(Serialize)]
+struct PrefetchStateSlice {
+    accounts: BTreeMap<String, PrefetchAccountInfo>,
+    storage: BTreeMap<String, BTreeMap<String, String>>,
+    code: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct PrefetchResponse {
+    result: String,
+    success: bool,
+    access_list: Vec<AccessListEntry>,
+    state_slice: PrefetchStateSlice,
+}
+
+fn decode_hex_data(s: &str) -> Result<Bytes, AppError> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    hex::decode(s)
+        .map(Bytes::from)
+        .map_err(|e| AppError::BadRequest(format!("invalid hex data: {e}")))
+}
+
+fn parse_u256(s: &str) -> Result<U256, AppError> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    U256::from_str_radix(s, 16).map_err(|e| AppError::BadRequest(format!("invalid value: {e}")))
+}
+
+async fn post_prefetch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PrefetchRequest>,
+) -> AppResult<impl IntoResponse> {
+    let to = parse_address(&req.to)?;
+    let from = req
+        .from
+        .as_deref()
+        .map(parse_address)
+        .transpose()?
+        .unwrap_or(Address::ZERO);
+    let calldata = req
+        .data
+        .as_deref()
+        .map(decode_hex_data)
+        .transpose()?
+        .unwrap_or_default();
+    let value = req
+        .value
+        .as_deref()
+        .map(parse_u256)
+        .transpose()?
+        .unwrap_or(U256::ZERO);
+
+    let head_block = state.db.get_head_block()?.unwrap_or(0);
+    let spec_id = state.chain_spec.spec_at(head_block, 0);
+
+    // Use WrapDatabaseRef since we only have &StateDb (shared via Arc)
+    let db_ref = WrapDatabaseRef(&state.db);
+    let inspector = AccessListInspector::new();
+
+    let ctx: revm::handler::MainnetContext<WrapDatabaseRef<&StateDb>> =
+        Context::new(db_ref, spec_id);
+    let ctx = ctx
+        .modify_block_chained(|b: &mut revm::context::BlockEnv| {
+            b.number = head_block;
+            b.gas_limit = 30_000_000;
+            b.basefee = 0;
+            b.prevrandao = Some(B256::ZERO);
+        })
+        .modify_tx_chained(|t: &mut TxEnv| {
+            t.caller = from;
+            t.gas_limit = 30_000_000;
+            t.kind = TxKind::Call(to);
+            t.data = calldata;
+            t.value = value;
+            t.gas_price = 0;
+        });
+
+    let mut evm = ctx.build_mainnet_with_inspector(inspector);
+    let result_and_state = evm
+        .inspect_replay()
+        .map_err(|e| AppError::Internal(format!("EVM error: {e:?}")))?;
+
+    let output = result_and_state
+        .result
+        .output()
+        .map(|o| format!("0x{}", hex::encode(o)))
+        .unwrap_or_else(|| "0x".into());
+    let success = result_and_state.result.is_success();
+
+    // Get recorded accesses from the inspector
+    let mut accesses = evm.inspector.into_accesses();
+    // Ensure caller and target are included (accessed at tx level, not opcode level)
+    accesses.entry(from).or_default();
+    accesses.entry(to).or_default();
+
+    // Build access_list and state_slice
+    let mut access_list = Vec::new();
+    let mut slice_accounts = BTreeMap::new();
+    let mut slice_storage = BTreeMap::new();
+    let mut slice_code = BTreeMap::new();
+
+    for (address, slots) in &accesses {
+        access_list.push(AccessListEntry {
+            address: format!("{:#x}", address),
+            slots: slots.iter().map(|s| format!("{:#x}", s)).collect(),
+        });
+
+        if let Ok(Some(info)) = state.db.get_account(address) {
+            slice_accounts.insert(
+                format!("{:#x}", address),
+                PrefetchAccountInfo {
+                    nonce: info.nonce,
+                    balance: format!("{:#x}", info.balance),
+                    code_hash: format!("{:#x}", info.code_hash),
+                },
+            );
+
+            if info.code_hash != B256::ZERO
+                && info.code_hash != alloy_primitives::KECCAK256_EMPTY
+            {
+                if let Ok(Some(code)) = state.db.get_code(&info.code_hash) {
+                    slice_code.insert(
+                        format!("{:#x}", info.code_hash),
+                        format!("0x{}", hex::encode(&code)),
+                    );
+                }
+            }
+        }
+
+        if !slots.is_empty() {
+            let mut slot_values = BTreeMap::new();
+            for slot in slots {
+                let val = state.db.get_storage(address, slot)?.unwrap_or(U256::ZERO);
+                slot_values.insert(format!("{:#x}", slot), format!("{:#x}", val));
+            }
+            slice_storage.insert(format!("{:#x}", address), slot_values);
+        }
+    }
+
+    Ok(Json(PrefetchResponse {
+        result: output,
+        success,
+        access_list,
+        state_slice: PrefetchStateSlice {
+            accounts: slice_accounts,
+            storage: slice_storage,
+            code: slice_code,
+        },
+    }))
+}
+
 // ── Router ──────────────────────────────────────────────────────────
 
 /// Build the axum [`Router`] with all v1 endpoints.
 ///
-/// The caller provides a shared [`StateDb`] wrapped in an [`Arc`].
-pub fn build_router(db: Arc<StateDb>) -> Router {
+/// The caller provides shared [`AppState`] wrapped in an [`Arc`].
+pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/head", get(get_head))
         .route("/v1/account/{addr}", get(get_account))
         .route("/v1/storage/{addr}/{slot}", get(get_storage))
         .route("/v1/code/{addr}", get(get_code))
         .route("/v1/batch", post(post_batch))
+        .route("/v1/prefetch", post(post_prefetch))
         .layer(CorsLayer::permissive())
-        .with_state(db)
+        .with_state(state)
 }
 
 #[cfg(test)]
@@ -224,16 +422,24 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn tmp_db() -> (tempfile::TempDir, Arc<StateDb>) {
+    fn tmp_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempfile::tempdir().unwrap();
-        let db = Arc::new(StateDb::open(dir.path()).unwrap());
-        (dir, db)
+        let db = StateDb::open(dir.path()).unwrap();
+        let state = Arc::new(AppState {
+            db,
+            chain_spec: ChainSpec {
+                chain_id: 1,
+                name: "test",
+                hardforks: vec![evm_state_chain_spec::HardforkActivation {
+                    condition: evm_state_chain_spec::HardforkCondition::Block(0),
+                    spec_id: revm::primitives::hardfork::SpecId::SHANGHAI,
+                }],
+            },
+        });
+        (dir, state)
     }
 
-    async fn request(
-        router: &Router,
-        uri: &str,
-    ) -> (StatusCode, serde_json::Value) {
+    async fn request(router: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
         let req = axum::http::Request::builder()
             .uri(uri)
             .body(Body::empty())
@@ -244,174 +450,6 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         (status, json)
     }
-
-    // ── /v1/head ────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn head_block_returns_value() {
-        let (_dir, db) = tmp_db();
-        db.set_head_block(65_000_000).unwrap();
-        let router = build_router(db);
-
-        let (status, json) = request(&router, "/v1/head").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["head_block"], 65_000_000);
-    }
-
-    #[tokio::test]
-    async fn head_block_not_set() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
-
-        let (status, _) = request(&router, "/v1/head").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    // ── /v1/account/:addr ───────────────────────────────────────────
-
-    #[tokio::test]
-    async fn account_found() {
-        let (_dir, db) = tmp_db();
-        let addr = "0x0000000000000000000000000000000000C0FFEE"
-            .parse::<Address>()
-            .unwrap();
-        let info = AccountInfo {
-            nonce: 42,
-            balance: alloy_primitives::U256::from(1_000_000u64),
-            code_hash: B256::ZERO,
-        };
-        db.set_account(&addr, &info).unwrap();
-        let router = build_router(db);
-
-        let (status, json) = request(
-            &router,
-            "/v1/account/0x0000000000000000000000000000000000C0FFEE",
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["nonce"], 42);
-        assert!(json["balance"].as_str().unwrap().starts_with("0x"));
-        assert!(json["code_hash"].as_str().unwrap().starts_with("0x"));
-    }
-
-    #[tokio::test]
-    async fn account_not_found() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
-
-        let (status, _) = request(
-            &router,
-            "/v1/account/0x0000000000000000000000000000000000000001",
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn account_invalid_address() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
-
-        let (status, json) = request(&router, "/v1/account/notanaddr").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(json["error"].as_str().unwrap().contains("invalid address"));
-    }
-
-    // ── /v1/storage/:addr/:slot ─────────────────────────────────────
-
-    #[tokio::test]
-    async fn storage_found() {
-        let (_dir, db) = tmp_db();
-        let addr = "0x0000000000000000000000000000000000C0FFEE"
-            .parse::<Address>()
-            .unwrap();
-        let slot = B256::ZERO;
-        let value = alloy_primitives::U256::from(0x42u64);
-        db.set_storage(&addr, &slot, &value).unwrap();
-        let router = build_router(db);
-
-        let (status, json) = request(
-            &router,
-            &format!(
-                "/v1/storage/0x0000000000000000000000000000000000C0FFEE/0x{:064x}",
-                0u64
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["value"].as_str().unwrap(), "0x42");
-    }
-
-    #[tokio::test]
-    async fn storage_not_found() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
-
-        let (status, _) = request(
-            &router,
-            &format!(
-                "/v1/storage/0x0000000000000000000000000000000000000001/0x{:064x}",
-                0u64
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn storage_invalid_params() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
-
-        let (status, json) = request(&router, "/v1/storage/badaddr/badslot").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(json["error"].as_str().unwrap().contains("invalid"));
-    }
-
-    // ── /v1/code/:addr ──────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn code_found() {
-        let (_dir, db) = tmp_db();
-        let addr = "0x0000000000000000000000000000000000C0FFEE"
-            .parse::<Address>()
-            .unwrap();
-        let bytecode = vec![0x60, 0x42, 0x60, 0x00, 0x55];
-        let code_hash = alloy_primitives::keccak256(&bytecode);
-        let info = AccountInfo {
-            nonce: 0,
-            balance: alloy_primitives::U256::ZERO,
-            code_hash: code_hash.into(),
-        };
-        db.set_account(&addr, &info).unwrap();
-        db.set_code(&code_hash.into(), &bytecode).unwrap();
-        let router = build_router(db);
-
-        let (status, json) = request(
-            &router,
-            "/v1/code/0x0000000000000000000000000000000000C0FFEE",
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["code"].as_str().unwrap(), "0x6042600055");
-    }
-
-    #[tokio::test]
-    async fn code_account_not_found() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
-
-        let (status, _) = request(
-            &router,
-            "/v1/code/0x0000000000000000000000000000000000000001",
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    // ── CORS ────────────────────────────────────────────────────────
-
-    // ── POST /v1/batch ────────────────────────────────────────────
 
     async fn post_json(
         router: &Router,
@@ -431,22 +469,190 @@ mod tests {
         (status, json)
     }
 
+    // ── /v1/head ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn head_block_returns_value() {
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(65_000_000).unwrap();
+        let router = build_router(state);
+
+        let (status, json) = request(&router, "/v1/head").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["head_block"], 65_000_000);
+    }
+
+    #[tokio::test]
+    async fn head_block_not_set() {
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
+
+        let (status, _) = request(&router, "/v1/head").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ── /v1/account/:addr ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn account_found() {
+        let (_dir, state) = tmp_state();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        let info = AccountInfo {
+            nonce: 42,
+            balance: U256::from(1_000_000u64),
+            code_hash: B256::ZERO,
+        };
+        state.db.set_account(&addr, &info).unwrap();
+        let router = build_router(state);
+
+        let (status, json) = request(
+            &router,
+            "/v1/account/0x0000000000000000000000000000000000C0FFEE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["nonce"], 42);
+        assert!(json["balance"].as_str().unwrap().starts_with("0x"));
+        assert!(json["code_hash"].as_str().unwrap().starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn account_not_found() {
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
+
+        let (status, _) = request(
+            &router,
+            "/v1/account/0x0000000000000000000000000000000000000001",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn account_invalid_address() {
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
+
+        let (status, json) = request(&router, "/v1/account/notanaddr").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid address"));
+    }
+
+    // ── /v1/storage/:addr/:slot ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn storage_found() {
+        let (_dir, state) = tmp_state();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        let slot = B256::ZERO;
+        let value = U256::from(0x42u64);
+        state.db.set_storage(&addr, &slot, &value).unwrap();
+        let router = build_router(state);
+
+        let (status, json) = request(
+            &router,
+            &format!(
+                "/v1/storage/0x0000000000000000000000000000000000C0FFEE/0x{:064x}",
+                0u64
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["value"].as_str().unwrap(), "0x42");
+    }
+
+    #[tokio::test]
+    async fn storage_not_found() {
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
+
+        let (status, _) = request(
+            &router,
+            &format!(
+                "/v1/storage/0x0000000000000000000000000000000000000001/0x{:064x}",
+                0u64
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn storage_invalid_params() {
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
+
+        let (status, json) = request(&router, "/v1/storage/badaddr/badslot").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid"));
+    }
+
+    // ── /v1/code/:addr ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn code_found() {
+        let (_dir, state) = tmp_state();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        let bytecode = vec![0x60, 0x42, 0x60, 0x00, 0x55];
+        let code_hash = alloy_primitives::keccak256(&bytecode);
+        let info = AccountInfo {
+            nonce: 0,
+            balance: U256::ZERO,
+            code_hash: code_hash.into(),
+        };
+        state.db.set_account(&addr, &info).unwrap();
+        state.db.set_code(&code_hash.into(), &bytecode).unwrap();
+        let router = build_router(state);
+
+        let (status, json) = request(
+            &router,
+            "/v1/code/0x0000000000000000000000000000000000C0FFEE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["code"].as_str().unwrap(), "0x6042600055");
+    }
+
+    #[tokio::test]
+    async fn code_account_not_found() {
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
+
+        let (status, _) = request(
+            &router,
+            "/v1/code/0x0000000000000000000000000000000000000001",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ── POST /v1/batch ──────────────────────────────────────────────
+
     #[tokio::test]
     async fn batch_mixed_reads() {
-        let (_dir, db) = tmp_db();
+        let (_dir, state) = tmp_state();
         let addr = "0x0000000000000000000000000000000000C0FFEE"
             .parse::<Address>()
             .unwrap();
         let info = AccountInfo {
             nonce: 10,
-            balance: alloy_primitives::U256::from(999u64),
+            balance: U256::from(999u64),
             code_hash: B256::ZERO,
         };
-        db.set_account(&addr, &info).unwrap();
+        state.db.set_account(&addr, &info).unwrap();
         let slot = B256::ZERO;
-        db.set_storage(&addr, &slot, &alloy_primitives::U256::from(0x42u64))
+        state
+            .db
+            .set_storage(&addr, &slot, &U256::from(0x42u64))
             .unwrap();
-        let router = build_router(db);
+        let router = build_router(state);
 
         let (status, json) = post_json(
             &router,
@@ -466,8 +672,8 @@ mod tests {
 
     #[tokio::test]
     async fn batch_empty() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
 
         let (status, json) = post_json(&router, "/v1/batch", serde_json::json!([])).await;
         assert_eq!(status, StatusCode::OK);
@@ -476,20 +682,22 @@ mod tests {
 
     #[tokio::test]
     async fn batch_partial_missing() {
-        let (_dir, db) = tmp_db();
+        let (_dir, state) = tmp_state();
         let addr = "0x0000000000000000000000000000000000C0FFEE"
             .parse::<Address>()
             .unwrap();
-        db.set_account(
-            &addr,
-            &AccountInfo {
-                nonce: 1,
-                balance: alloy_primitives::U256::ZERO,
-                code_hash: B256::ZERO,
-            },
-        )
-        .unwrap();
-        let router = build_router(db);
+        state
+            .db
+            .set_account(
+                &addr,
+                &AccountInfo {
+                    nonce: 1,
+                    balance: U256::ZERO,
+                    code_hash: B256::ZERO,
+                },
+            )
+            .unwrap();
+        let router = build_router(state);
 
         let (status, json) = post_json(
             &router,
@@ -509,8 +717,8 @@ mod tests {
 
     #[tokio::test]
     async fn batch_large() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
 
         let items: Vec<serde_json::Value> = (0..1000)
             .map(|i| {
@@ -525,7 +733,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 1000);
-        // All should be "not found" since DB is empty
         for item in arr {
             assert_eq!(item["error"].as_str().unwrap(), "not found");
         }
@@ -533,8 +740,8 @@ mod tests {
 
     #[tokio::test]
     async fn batch_malformed_item() {
-        let (_dir, db) = tmp_db();
-        let router = build_router(db);
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
 
         let req = axum::http::Request::builder()
             .method("POST")
@@ -548,17 +755,135 @@ mod tests {
             ))
             .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
-        // axum returns 422 for deserialization failures
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ── POST /v1/prefetch ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn prefetch_sload_contract() {
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(100).unwrap();
+
+        // Contract: PUSH1 0x00  SLOAD  PUSH1 0x00  MSTORE  PUSH1 0x20  PUSH1 0x00  RETURN
+        // Reads slot 0 and returns its value as 32 bytes.
+        let bytecode = vec![
+            0x60, 0x00, // PUSH1 0x00
+            0x54, // SLOAD
+            0x60, 0x00, // PUSH1 0x00
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 0x20
+            0x60, 0x00, // PUSH1 0x00
+            0xF3, // RETURN
+        ];
+        let code_hash = alloy_primitives::keccak256(&bytecode);
+        let contract = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+
+        state
+            .db
+            .set_account(
+                &contract,
+                &AccountInfo {
+                    nonce: 0,
+                    balance: U256::ZERO,
+                    code_hash: code_hash.into(),
+                },
+            )
+            .unwrap();
+        state.db.set_code(&code_hash.into(), &bytecode).unwrap();
+        state
+            .db
+            .set_storage(&contract, &B256::ZERO, &U256::from(0xCAFEu64))
+            .unwrap();
+
+        let router = build_router(state);
+        let (status, json) = post_json(
+            &router,
+            "/v1/prefetch",
+            serde_json::json!({
+                "to": "0x0000000000000000000000000000000000C0FFEE",
+                "data": "0x"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["success"].as_bool().unwrap());
+        // Result should contain 0xCAFE (as 32-byte padded)
+        let result = json["result"].as_str().unwrap().to_lowercase();
+        assert!(result.contains("cafe"));
+
+        // Access list should include the contract
+        let al = json["access_list"].as_array().unwrap();
+        let contract_entry = al
+            .iter()
+            .find(|e| {
+                e["address"]
+                    .as_str()
+                    .unwrap()
+                    .to_lowercase()
+                    .contains("c0ffee")
+            })
+            .expect("contract not in access list");
+        // Should have slot 0 recorded
+        assert!(!contract_entry["slots"].as_array().unwrap().is_empty());
+
+        // State slice should have the contract's storage
+        assert!(!json["state_slice"]["storage"].as_object().unwrap().is_empty());
+        // State slice should have accounts
+        assert!(!json["state_slice"]["accounts"].as_object().unwrap().is_empty());
+        // State slice should have code
+        assert!(!json["state_slice"]["code"].as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prefetch_nonexistent_contract() {
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(1).unwrap();
+        let router = build_router(state);
+
+        let (status, json) = post_json(
+            &router,
+            "/v1/prefetch",
+            serde_json::json!({
+                "to": "0x0000000000000000000000000000000000DEAD01",
+                "data": "0x"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Call to empty address succeeds but returns empty result
+        assert_eq!(json["result"].as_str().unwrap(), "0x");
+    }
+
+    #[tokio::test]
+    async fn prefetch_invalid_data() {
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(1).unwrap();
+        let router = build_router(state);
+
+        let (status, json) = post_json(
+            &router,
+            "/v1/prefetch",
+            serde_json::json!({
+                "to": "0x0000000000000000000000000000000000DEAD01",
+                "data": "not_hex"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("invalid hex"));
     }
 
     // ── CORS ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn cors_headers_present() {
-        let (_dir, db) = tmp_db();
-        db.set_head_block(1).unwrap();
-        let router = build_router(db);
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(1).unwrap();
+        let router = build_router(state);
 
         let req = axum::http::Request::builder()
             .uri("/v1/head")

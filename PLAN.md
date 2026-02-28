@@ -89,7 +89,7 @@ Steps are grouped by **dependency tier** — everything within the same tier can
 
 ### Step 12: SQD Network Data Fetcher
 **Crate**: `crates/sqd-fetcher`
-**Scope**: Stream blocks + transactions from the Subsquid Network for Polygon. Implement pagination, error handling, and retry logic. Deserialize into the types from Step 3. Configurable block range (from/to). Output is an async stream of `Block` objects  The fetcher should use Accept-Encoding: zstd when streaming from the API.
+**Scope**: Stream blocks + transactions from the Subsquid Network for Polygon and Ethereum. Implement pagination, error handling, and retry logic. Deserialize into the types from Step 3. Configurable block range (from/to). Output is an async stream of `Block` objects  The fetcher should use Accept-Encoding: zstd when streaming from the API.
 **Tests**: Fetch a known block range (integration test, can be skipped in CI without network). Unit tests for pagination logic, retry behavior, deserialization of real SQD response fixtures. 
 **Depends on**: Step 3
 
