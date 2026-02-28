@@ -1313,9 +1313,11 @@ dependencies = [
  "evm-state-common",
  "evm-state-data-types",
  "evm-state-db",
+ "futures",
  "revm",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

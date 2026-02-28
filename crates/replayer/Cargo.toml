@@ -11,6 +11,8 @@ evm-state-chain-spec = { workspace = true }
 alloy-primitives = { workspace = true }
 revm = { workspace = true }
 thiserror = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true }
