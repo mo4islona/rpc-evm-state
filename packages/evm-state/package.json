@@ -1,0 +1,31 @@
+{
+  "name": "@sqd/evm-state",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript SDK for the EVM state service — raw calls, ABI-aware reads, and viem-compatible transport",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/subsquid/rpc-evm-state",
+    "directory": "packages/evm-state"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "evm-state-client-wasm": "file:../../crates/client-wasm/pkg",
+    "viem": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  }
+}
