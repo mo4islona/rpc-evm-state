@@ -44,6 +44,17 @@ batch.set_storage(addr, slot, value)?;
 batch.commit()?;
 ```
 
+## revm Database Integration
+
+`StateDb` implements both `revm::Database` and `revm::DatabaseRef` traits, allowing it to be used directly as the backing store for EVM execution:
+
+- `basic(address)` → reads account info from the `accounts` table
+- `code_by_hash(hash)` → reads bytecode from the `code` table
+- `storage(address, index)` → reads slot values from the `storage` table
+- `block_hash(number)` → returns `B256::ZERO` (block hashes not stored)
+
+This means you can pass `&mut StateDb` directly to revm's `Context::new()` and execute EVM transactions against the stored state.
+
 ## Design Choices
 
 - **No Merkle trie** — flat KV layout optimized for point reads (sub-microsecond via mmap).

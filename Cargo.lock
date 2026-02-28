@@ -1097,6 +1097,7 @@ dependencies = [
  "alloy-primitives",
  "evm-state-common",
  "libmdbx",
+ "revm",
  "tempfile",
  "thiserror",
 ]

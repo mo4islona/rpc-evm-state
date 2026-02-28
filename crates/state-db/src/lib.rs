@@ -1,3 +1,5 @@
+mod revm_db;
+
 use std::path::Path;
 
 use alloy_primitives::{Address, B256, U256};

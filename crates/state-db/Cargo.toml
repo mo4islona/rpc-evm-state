@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 evm-state-common = { workspace = true }
 alloy-primitives = { workspace = true }
+revm = { workspace = true }
 thiserror = { workspace = true }
 libmdbx = "0.6"
 
