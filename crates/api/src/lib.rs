@@ -4,10 +4,10 @@ use alloy_primitives::{hex, Address, B256};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use evm_state_db::StateDb;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 // ── Error handling ──────────────────────────────────────────────────
@@ -117,6 +117,89 @@ async fn get_code(
     }))
 }
 
+// ── Batch endpoint ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum BatchItem {
+    Account { addr: String },
+    Storage { addr: String, slot: String },
+    Code { addr: String },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum BatchResult {
+    Account(AccountResponse),
+    Storage(StorageResponse),
+    Code(CodeResponse),
+    NotFound { error: &'static str },
+    Error { error: String },
+}
+
+async fn post_batch(
+    State(db): State<Arc<StateDb>>,
+    Json(items): Json<Vec<BatchItem>>,
+) -> AppResult<impl IntoResponse> {
+    let results: Vec<BatchResult> = items
+        .iter()
+        .map(|item| match item {
+            BatchItem::Account { addr } => {
+                let address = addr.parse::<Address>().map_err(|_| {
+                    format!("invalid address: {addr}")
+                })?;
+                match db.get_account(&address) {
+                    Ok(Some(info)) => Ok(BatchResult::Account(AccountResponse {
+                        nonce: info.nonce,
+                        balance: format!("{:#x}", info.balance),
+                        code_hash: format!("{:#x}", info.code_hash),
+                    })),
+                    Ok(None) => Ok(BatchResult::NotFound { error: "not found" }),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            BatchItem::Storage { addr, slot } => {
+                let address = addr.parse::<Address>().map_err(|_| {
+                    format!("invalid address: {addr}")
+                })?;
+                let slot = slot.parse::<B256>().map_err(|_| {
+                    format!("invalid slot: {slot}")
+                })?;
+                match db.get_storage(&address, &slot) {
+                    Ok(Some(value)) => Ok(BatchResult::Storage(StorageResponse {
+                        value: format!("{:#x}", value),
+                    })),
+                    Ok(None) => Ok(BatchResult::NotFound { error: "not found" }),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            BatchItem::Code { addr } => {
+                let address = addr.parse::<Address>().map_err(|_| {
+                    format!("invalid address: {addr}")
+                })?;
+                let info = match db.get_account(&address) {
+                    Ok(Some(info)) => info,
+                    Ok(None) => return Ok(BatchResult::NotFound { error: "not found" }),
+                    Err(e) => return Err(e.to_string()),
+                };
+                match db.get_code(&info.code_hash) {
+                    Ok(Some(code)) => Ok(BatchResult::Code(CodeResponse {
+                        code: format!("0x{}", hex::encode(&code)),
+                    })),
+                    Ok(None) => Ok(BatchResult::NotFound { error: "not found" }),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+        })
+        .map(|r| match r {
+            Ok(result) => result,
+            Err(msg) => BatchResult::Error { error: msg },
+        })
+        .collect();
+
+    Ok(Json(results))
+}
+
 // ── Router ──────────────────────────────────────────────────────────
 
 /// Build the axum [`Router`] with all v1 endpoints.
@@ -128,6 +211,7 @@ pub fn build_router(db: Arc<StateDb>) -> Router {
         .route("/v1/account/{addr}", get(get_account))
         .route("/v1/storage/{addr}/{slot}", get(get_storage))
         .route("/v1/code/{addr}", get(get_code))
+        .route("/v1/batch", post(post_batch))
         .layer(CorsLayer::permissive())
         .with_state(db)
 }
@@ -323,6 +407,149 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ── CORS ────────────────────────────────────────────────────────
+
+    // ── POST /v1/batch ────────────────────────────────────────────
+
+    async fn post_json(
+        router: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn batch_mixed_reads() {
+        let (_dir, db) = tmp_db();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        let info = AccountInfo {
+            nonce: 10,
+            balance: alloy_primitives::U256::from(999u64),
+            code_hash: B256::ZERO,
+        };
+        db.set_account(&addr, &info).unwrap();
+        let slot = B256::ZERO;
+        db.set_storage(&addr, &slot, &alloy_primitives::U256::from(0x42u64))
+            .unwrap();
+        let router = build_router(db);
+
+        let (status, json) = post_json(
+            &router,
+            "/v1/batch",
+            serde_json::json!([
+                { "type": "account", "addr": "0x0000000000000000000000000000000000C0FFEE" },
+                { "type": "storage", "addr": "0x0000000000000000000000000000000000C0FFEE", "slot": format!("0x{:064x}", 0u64) },
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["nonce"], 10);
+        assert_eq!(arr[1]["value"].as_str().unwrap(), "0x42");
+    }
+
+    #[tokio::test]
+    async fn batch_empty() {
+        let (_dir, db) = tmp_db();
+        let router = build_router(db);
+
+        let (status, json) = post_json(&router, "/v1/batch", serde_json::json!([])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_partial_missing() {
+        let (_dir, db) = tmp_db();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        db.set_account(
+            &addr,
+            &AccountInfo {
+                nonce: 1,
+                balance: alloy_primitives::U256::ZERO,
+                code_hash: B256::ZERO,
+            },
+        )
+        .unwrap();
+        let router = build_router(db);
+
+        let (status, json) = post_json(
+            &router,
+            "/v1/batch",
+            serde_json::json!([
+                { "type": "account", "addr": "0x0000000000000000000000000000000000C0FFEE" },
+                { "type": "account", "addr": "0x0000000000000000000000000000000000000001" },
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["nonce"], 1);
+        assert_eq!(arr[1]["error"].as_str().unwrap(), "not found");
+    }
+
+    #[tokio::test]
+    async fn batch_large() {
+        let (_dir, db) = tmp_db();
+        let router = build_router(db);
+
+        let items: Vec<serde_json::Value> = (0..1000)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "account",
+                    "addr": format!("0x{:040x}", i),
+                })
+            })
+            .collect();
+
+        let (status, json) = post_json(&router, "/v1/batch", serde_json::json!(items)).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1000);
+        // All should be "not found" since DB is empty
+        for item in arr {
+            assert_eq!(item["error"].as_str().unwrap(), "not found");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_malformed_item() {
+        let (_dir, db) = tmp_db();
+        let router = build_router(db);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/batch")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!([
+                    { "type": "unknown", "addr": "0x01" }
+                ]))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        // axum returns 422 for deserialization failures
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // ── CORS ────────────────────────────────────────────────────────

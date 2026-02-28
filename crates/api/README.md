@@ -10,13 +10,29 @@ HTTP API for reading EVM state from a [`StateDb`](../state-db). Built with [axum
 | GET | `/v1/account/{addr}` | Account info (nonce, balance, code hash) |
 | GET | `/v1/storage/{addr}/{slot}` | Storage slot value |
 | GET | `/v1/code/{addr}` | Contract bytecode (looked up via account's code hash) |
+| POST | `/v1/batch` | Batch read — multiple queries in one request |
 
 All responses are JSON with hex-encoded values. Addresses and slots are accepted with or without `0x` prefix.
 
+## Batch endpoint
+
+`POST /v1/batch` accepts a JSON array of requests and returns results in the same order.
+
+```json
+[
+  { "type": "account", "addr": "0x..." },
+  { "type": "storage", "addr": "0x...", "slot": "0x..." },
+  { "type": "code",    "addr": "0x..." }
+]
+```
+
+Each result is the corresponding response object, or `{ "error": "not found" }` for missing data. Invalid input within a batch item returns `{ "error": "..." }` for that item without failing the whole batch.
+
 ## Error codes
 
-- **400** — malformed address or slot
-- **404** — requested data not found
+- **400** — malformed address or slot (single endpoints)
+- **404** — requested data not found (single endpoints)
+- **422** — malformed batch request body
 - **500** — internal database error
 
 ## Usage
