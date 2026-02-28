@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy_primitives::{hex, Address, Bytes, B256, U256};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use evm_state_chain_spec::ChainSpec;
 use evm_state_db::StateDb;
@@ -397,6 +398,172 @@ async fn post_prefetch(
     }))
 }
 
+// ── WebSocket endpoint ──────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct WsRequest {
+    id: Option<serde_json::Value>,
+    #[serde(flatten)]
+    query: WsQuery,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WsQuery {
+    Account { addr: String },
+    Storage { addr: String, slot: String },
+    Code { addr: String },
+    Head,
+}
+
+#[derive(Serialize)]
+struct WsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<serde_json::Value>,
+    #[serde(flatten)]
+    payload: WsPayload,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WsPayload {
+    Result { result: serde_json::Value },
+    Error { error: String },
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_socket(socket, state))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+    while let Some(Ok(msg)) = socket.recv().await {
+        match msg {
+            Message::Text(text) => {
+                let response = process_ws_message(&text, &state);
+                let json = serde_json::to_string(&response).unwrap();
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Message::Close(_) => return,
+            _ => {}
+        }
+    }
+}
+
+fn process_ws_message(text: &str, state: &AppState) -> WsResponse {
+    let req: WsRequest = match serde_json::from_str(text) {
+        Ok(r) => r,
+        Err(e) => {
+            return WsResponse {
+                id: None,
+                payload: WsPayload::Error {
+                    error: format!("invalid request: {e}"),
+                },
+            };
+        }
+    };
+
+    let id = req.id;
+    let payload = match req.query {
+        WsQuery::Head => match state.db.get_head_block() {
+            Ok(Some(n)) => WsPayload::Result {
+                result: serde_json::json!({ "head_block": n }),
+            },
+            Ok(None) => WsPayload::Error {
+                error: "not found".into(),
+            },
+            Err(e) => WsPayload::Error {
+                error: e.to_string(),
+            },
+        },
+        WsQuery::Account { addr } => match addr.parse::<Address>() {
+            Err(_) => WsPayload::Error {
+                error: format!("invalid address: {addr}"),
+            },
+            Ok(address) => match state.db.get_account(&address) {
+                Ok(Some(info)) => WsPayload::Result {
+                    result: serde_json::json!({
+                        "nonce": info.nonce,
+                        "balance": format!("{:#x}", info.balance),
+                        "code_hash": format!("{:#x}", info.code_hash),
+                    }),
+                },
+                Ok(None) => WsPayload::Error {
+                    error: "not found".into(),
+                },
+                Err(e) => WsPayload::Error {
+                    error: e.to_string(),
+                },
+            },
+        },
+        WsQuery::Storage { addr, slot } => {
+            let address = match addr.parse::<Address>() {
+                Ok(a) => a,
+                Err(_) => {
+                    return WsResponse {
+                        id,
+                        payload: WsPayload::Error {
+                            error: format!("invalid address: {addr}"),
+                        },
+                    };
+                }
+            };
+            let slot = match slot.parse::<B256>() {
+                Ok(s) => s,
+                Err(_) => {
+                    return WsResponse {
+                        id,
+                        payload: WsPayload::Error {
+                            error: format!("invalid slot: {slot}"),
+                        },
+                    };
+                }
+            };
+            match state.db.get_storage(&address, &slot) {
+                Ok(Some(value)) => WsPayload::Result {
+                    result: serde_json::json!({ "value": format!("{:#x}", value) }),
+                },
+                Ok(None) => WsPayload::Error {
+                    error: "not found".into(),
+                },
+                Err(e) => WsPayload::Error {
+                    error: e.to_string(),
+                },
+            }
+        }
+        WsQuery::Code { addr } => match addr.parse::<Address>() {
+            Err(_) => WsPayload::Error {
+                error: format!("invalid address: {addr}"),
+            },
+            Ok(address) => match state.db.get_account(&address) {
+                Ok(Some(info)) => match state.db.get_code(&info.code_hash) {
+                    Ok(Some(code)) => WsPayload::Result {
+                        result: serde_json::json!({ "code": format!("0x{}", hex::encode(&code)) }),
+                    },
+                    Ok(None) => WsPayload::Error {
+                        error: "not found".into(),
+                    },
+                    Err(e) => WsPayload::Error {
+                        error: e.to_string(),
+                    },
+                },
+                Ok(None) => WsPayload::Error {
+                    error: "not found".into(),
+                },
+                Err(e) => WsPayload::Error {
+                    error: e.to_string(),
+                },
+            },
+        },
+    };
+
+    WsResponse { id, payload }
+}
+
 // ── Router ──────────────────────────────────────────────────────────
 
 /// Build the axum [`Router`] with all v1 endpoints.
@@ -410,6 +577,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/code/{addr}", get(get_code))
         .route("/v1/batch", post(post_batch))
         .route("/v1/prefetch", post(post_prefetch))
+        .route("/v1/stream", any(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -875,6 +1043,171 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].as_str().unwrap().contains("invalid hex"));
+    }
+
+    // ── WebSocket (process_ws_message unit tests) ─────────────────
+
+    #[test]
+    fn ws_query_head() {
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(42).unwrap();
+
+        let resp = process_ws_message(r#"{"type":"head"}"#, &state);
+        assert!(resp.id.is_none());
+        match &resp.payload {
+            WsPayload::Result { result } => assert_eq!(result["head_block"], 42),
+            WsPayload::Error { error } => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[test]
+    fn ws_query_account() {
+        let (_dir, state) = tmp_state();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        state
+            .db
+            .set_account(
+                &addr,
+                &AccountInfo {
+                    nonce: 7,
+                    balance: U256::from(100u64),
+                    code_hash: B256::ZERO,
+                },
+            )
+            .unwrap();
+
+        let resp = process_ws_message(
+            r#"{"type":"account","addr":"0x0000000000000000000000000000000000C0FFEE"}"#,
+            &state,
+        );
+        match &resp.payload {
+            WsPayload::Result { result } => {
+                assert_eq!(result["nonce"], 7);
+                assert!(result["balance"].as_str().unwrap().starts_with("0x"));
+            }
+            WsPayload::Error { error } => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[test]
+    fn ws_query_storage() {
+        let (_dir, state) = tmp_state();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        state
+            .db
+            .set_storage(&addr, &B256::ZERO, &U256::from(0xBEEFu64))
+            .unwrap();
+
+        let msg = format!(
+            r#"{{"type":"storage","addr":"0x0000000000000000000000000000000000C0FFEE","slot":"0x{:064x}"}}"#,
+            0u64
+        );
+        let resp = process_ws_message(&msg, &state);
+        match &resp.payload {
+            WsPayload::Result { result } => {
+                assert_eq!(result["value"].as_str().unwrap(), "0xbeef");
+            }
+            WsPayload::Error { error } => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[test]
+    fn ws_query_code() {
+        let (_dir, state) = tmp_state();
+        let addr = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+        let bytecode = vec![0x60, 0x42];
+        let code_hash = alloy_primitives::keccak256(&bytecode);
+        state
+            .db
+            .set_account(
+                &addr,
+                &AccountInfo {
+                    nonce: 0,
+                    balance: U256::ZERO,
+                    code_hash: code_hash.into(),
+                },
+            )
+            .unwrap();
+        state.db.set_code(&code_hash.into(), &bytecode).unwrap();
+
+        let resp = process_ws_message(
+            r#"{"type":"code","addr":"0x0000000000000000000000000000000000C0FFEE"}"#,
+            &state,
+        );
+        match &resp.payload {
+            WsPayload::Result { result } => {
+                assert_eq!(result["code"].as_str().unwrap(), "0x6042");
+            }
+            WsPayload::Error { error } => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[test]
+    fn ws_not_found() {
+        let (_dir, state) = tmp_state();
+
+        let resp = process_ws_message(
+            r#"{"type":"account","addr":"0x0000000000000000000000000000000000000001"}"#,
+            &state,
+        );
+        match &resp.payload {
+            WsPayload::Error { error } => assert_eq!(error, "not found"),
+            WsPayload::Result { .. } => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn ws_malformed_message() {
+        let (_dir, state) = tmp_state();
+
+        let resp = process_ws_message("not json at all", &state);
+        match &resp.payload {
+            WsPayload::Error { error } => assert!(error.contains("invalid request")),
+            WsPayload::Result { .. } => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn ws_with_id() {
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(99).unwrap();
+
+        let resp = process_ws_message(r#"{"id":42,"type":"head"}"#, &state);
+        assert_eq!(resp.id, Some(serde_json::json!(42)));
+        match &resp.payload {
+            WsPayload::Result { result } => assert_eq!(result["head_block"], 99),
+            WsPayload::Error { error } => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[test]
+    fn ws_with_string_id() {
+        let (_dir, state) = tmp_state();
+        state.db.set_head_block(1).unwrap();
+
+        let resp = process_ws_message(r#"{"id":"req-1","type":"head"}"#, &state);
+        assert_eq!(resp.id, Some(serde_json::json!("req-1")));
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_handshake() {
+        let (_dir, state) = tmp_state();
+        let router = build_router(state);
+
+        // A regular GET without upgrade headers should fail
+        let req = axum::http::Request::builder()
+            .uri("/v1/stream")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        // Without proper WebSocket headers, the upgrade extractor rejects the request
+        assert_ne!(resp.status(), StatusCode::OK);
     }
 
     // ── CORS ────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ HTTP API for reading EVM state from a [`StateDb`](../state-db). Built with [axum
 | GET | `/v1/code/{addr}` | Contract bytecode (looked up via account's code hash) |
 | POST | `/v1/batch` | Batch read — multiple queries in one request |
 | POST | `/v1/prefetch` | Speculative execution — returns result + access list + state slice |
+| WS | `/v1/stream` | WebSocket — interactive state queries over a persistent connection |
 
 All responses are JSON with hex-encoded values. Addresses and slots are accepted with or without `0x` prefix.
 
@@ -55,6 +56,29 @@ Each result is the corresponding response object, or `{ "error": "not found" }` 
 ```
 
 The `state_slice` contains everything needed to re-execute the call locally — account info, storage values, and contract bytecode for all accessed addresses.
+
+## WebSocket endpoint
+
+Connect to `/v1/stream` via WebSocket for interactive state queries. Each message is a JSON object with a `type` field and an optional `id` for request correlation.
+
+**Request messages:**
+```json
+{"type": "head"}
+{"type": "account", "addr": "0x..."}
+{"type": "storage", "addr": "0x...", "slot": "0x..."}
+{"type": "code", "addr": "0x..."}
+```
+
+**Response messages:**
+```json
+{"id": 1, "result": {"head_block": 65000000}}
+{"id": 2, "result": {"nonce": 42, "balance": "0x...", "code_hash": "0x..."}}
+{"id": 3, "result": {"value": "0x..."}}
+{"id": 4, "result": {"code": "0x..."}}
+{"error": "not found"}
+```
+
+The `id` field is echoed back if provided, allowing clients to match responses to requests. If omitted, the response will not include an `id`.
 
 ## Error codes
 
