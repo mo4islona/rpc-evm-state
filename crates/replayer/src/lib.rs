@@ -1,20 +1,29 @@
 pub mod pipeline;
 
-use alloy_primitives::B256;
+use std::error::Error as _;
+
+use alloy_primitives::{Address, B256};
 use evm_state_chain_spec::{block_env_from_header, tx_env_from_transaction, ChainSpec};
 use evm_state_common::AccountInfo;
 use evm_state_db::StateDb;
 use revm::database::{AccountState, CacheDB};
 use revm::database_interface::DatabaseCommit;
+use revm::handler::{EthFrame, Handler, MainnetHandler};
 use revm::{Context, ExecuteEvm, MainBuilder};
+use tracing::trace;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("database error: {0}")]
     Db(#[from] evm_state_db::Error),
 
-    #[error("EVM error at tx index {tx_index}: {message}")]
-    Evm { tx_index: usize, message: String },
+    #[error("EVM error at block {block_number}, {} at index {tx_index}: {message}", if *is_system { "system transaction" } else { "transaction" })]
+    Evm {
+        block_number: u64,
+        tx_index: usize,
+        is_system: bool,
+        message: String,
+    },
 
     #[error("block source error: {0}")]
     Source(String),
@@ -51,18 +60,42 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     let mut tx_results = Vec::with_capacity(block.transactions.len());
 
     for (idx, tx) in block.transactions.iter().enumerate() {
-        // Skip system transactions (e.g. Polygon Bor state sync).
-        // These are injected by the consensus layer with from=0x0 and gas=0,
-        // and their state effects are applied outside the EVM.
-        if is_system_tx(tx) {
-            tx_results.push(TxResult {
-                gas_used: 0,
-                success: true,
-            });
-            continue;
+        let is_system = is_system_tx(tx);
+
+        let mut tx_env = tx_env_from_transaction(tx, chain_spec.chain_id);
+
+        // System transactions (e.g. Polygon Bor state sync) are injected by the
+        // consensus layer with from=0x0 and gas=0. Use the block gas limit
+        // since the real gas limit is managed by the consensus layer.
+        if is_system {
+            tx_env.gas_limit = block_env.gas_limit;
+            tx_env.gas_price = 0;
         }
 
-        let tx_env = tx_env_from_transaction(tx, chain_spec.chain_id);
+        // Log the caller's current nonce from state before executing.
+        if let Some(caller) = tx.from {
+            let db_nonce = db
+                .get_account(&caller)
+                .ok()
+                .flatten()
+                .map(|a| a.nonce)
+                .unwrap_or(0);
+            let cache_nonce = cache_db
+                .cache
+                .accounts
+                .get(&caller)
+                .map(|a| a.info.nonce);
+            trace!(
+                block = block.header.number,
+                tx_index = idx,
+                caller = %caller,
+                db_nonce,
+                cache_nonce = ?cache_nonce,
+                tx_nonce = tx.nonce.unwrap_or(0),
+                is_system,
+                "pre-execution state"
+            );
+        }
 
         // Create a fresh EVM context per transaction (clean journal).
         // The CacheDB persists across transactions so state accumulates.
@@ -76,9 +109,30 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
                 .modify_block_chained(|b: &mut revm::context::BlockEnv| *b = block_env.clone())
                 .modify_tx_chained(|t: &mut revm::context::TxEnv| *t = tx_env);
             let mut evm = ctx.build_mainnet();
-            evm.replay().map_err(|e| Error::Evm {
-                tx_index: idx,
-                message: format!("{e:?}"),
+
+            if is_system {
+                // System transactions skip all validation and pre-execution
+                // (no nonce check, no balance deduction, no nonce bump).
+                // Only execution + output are run, matching how Bor applies
+                // state sync calls outside normal transaction processing.
+                let mut handler = MainnetHandler::<_, _, EthFrame<_, _, _>>::default();
+                handler.run_system_call(&mut evm)
+            } else {
+                evm.replay()
+            }
+            .map_err(|e| {
+                // Extract the inner error message, stripping EVMError's
+                // outer "transaction validation error: " / "header validation error: " wrapper.
+                let reason = e.source().map(|s| s.to_string()).unwrap_or_else(|| e.to_string());
+                let from = tx.from.map(|a| format!("{a}")).unwrap_or_default();
+                let to = tx.to.map(|a| format!("{a}")).unwrap_or("(create)".into());
+                let hash = tx.hash.map(|h| format!("{h}")).unwrap_or_default();
+                Error::Evm {
+                    block_number: block.header.number,
+                    tx_index: idx,
+                    is_system,
+                    message: format!("{reason}\n  from: {from}\n  to:   {to}\n  hash: {hash}"),
+                }
             })?
         }; // evm dropped — releases &mut cache_db
 
@@ -99,7 +153,7 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     })
 }
 
-use evm_state_data_types::{Block, Transaction};
+use evm_state_data_types::{Block, StateDiff, Transaction};
 
 /// Detect system transactions injected by the consensus layer.
 ///
@@ -110,6 +164,93 @@ fn is_system_tx(tx: &Transaction) -> bool {
     let from_zero = tx.from.map_or(false, |a| a.is_zero());
     let gas_zero = tx.gas.map_or(true, |g| g.as_u64() == 0);
     from_zero && gas_zero
+}
+
+/// Apply state diffs directly to the database without replaying transactions.
+///
+/// This is used for chains (e.g. Polygon) where the SQD portal's transaction
+/// stream is incomplete (missing state sync data). The portal's `stateDiffs`
+/// endpoint captures the correct final state including consensus-injected changes.
+pub fn apply_state_diffs(db: &StateDb, block: &Block) -> Result<()> {
+    let batch = db.write_batch()?;
+
+    if !block.state_diffs.is_empty() {
+        // Group diffs by address.
+        let mut by_address: std::collections::HashMap<Address, Vec<&StateDiff>> =
+            std::collections::HashMap::new();
+        for diff in &block.state_diffs {
+            if let Some(addr) = diff.address {
+                by_address.entry(addr).or_default().push(diff);
+            }
+        }
+
+        for (address, diffs) in &by_address {
+            // Check for account deletion.
+            let deleted = diffs.iter().any(|d| d.kind.as_deref() == Some("-") && matches!(d.key.as_deref(), Some("balance" | "nonce" | "code")));
+            if deleted {
+                batch.delete_account(address)?;
+                continue;
+            }
+
+            // Start from current account state or default.
+            let mut info = db.get_account(address)?.unwrap_or(AccountInfo {
+                nonce: 0,
+                balance: alloy_primitives::U256::ZERO,
+                code_hash: B256::ZERO,
+            });
+
+            for diff in diffs {
+                let key = match diff.key.as_deref() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let next = match diff.next.as_deref() {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                match key {
+                    "nonce" => {
+                        let hex = next.strip_prefix("0x").unwrap_or(next);
+                        info.nonce = u64::from_str_radix(hex, 16).unwrap_or(0);
+                    }
+                    "balance" => {
+                        let hex = next.strip_prefix("0x").unwrap_or(next);
+                        info.balance = alloy_primitives::U256::from_str_radix(hex, 16)
+                            .unwrap_or(alloy_primitives::U256::ZERO);
+                    }
+                    "code" => {
+                        let hex = next.strip_prefix("0x").unwrap_or(next);
+                        if let Ok(bytecode) = alloy_primitives::hex::decode(hex) {
+                            let hash = alloy_primitives::keccak256(&bytecode);
+                            batch.set_code(&hash.into(), &bytecode)?;
+                            info.code_hash = hash.into();
+                        }
+                    }
+                    slot_hex => {
+                        // Storage slot.
+                        if let Ok(slot) = slot_hex.parse::<B256>() {
+                            if diff.kind.as_deref() == Some("-") {
+                                batch.delete_storage(address, &slot)?;
+                            } else {
+                                let hex = next.strip_prefix("0x").unwrap_or(next);
+                                let value = alloy_primitives::U256::from_str_radix(hex, 16)
+                                    .unwrap_or(alloy_primitives::U256::ZERO);
+                                batch.set_storage(address, &slot, &value)?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            batch.set_account(address, &info)?;
+        }
+    }
+
+    batch.set_head_block(block.header.number)?;
+    batch.commit()?;
+
+    Ok(())
 }
 
 /// Write CacheDB contents to StateDb via a single WriteBatch.
@@ -131,6 +272,12 @@ fn flush_cache_to_db(
                     balance: cached_account.info.balance,
                     code_hash: cached_account.info.code_hash,
                 };
+                trace!(
+                    block = block_number,
+                    address = %address,
+                    nonce = info.nonce,
+                    "flush account"
+                );
                 batch.set_account(address, &info)?;
 
                 for (&slot_u256, &value) in &cached_account.storage {

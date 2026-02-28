@@ -229,6 +229,34 @@ impl Resolved {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/// Format a number with thousand separators: `1234567` → `"1,234,567"`.
+fn fmt_num(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}
+
+/// Format a duration as a human-readable ETA string.
+/// Examples: "32s", "5m 12s", "1h 23m", "3d 5h"
+fn fmt_eta(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
 fn dataset_for_chain(chain_id: u64) -> Result<&'static str> {
     match chain_id {
         1 => Ok(evm_state_sqd_fetcher::ETHEREUM_DATASET),
@@ -289,28 +317,50 @@ async fn run_replay(
     let head = db.get_head_block()?;
     let start_block = from.or(head.map(|h| h + 1)).unwrap_or(0);
 
+    let use_state_diffs = chain_spec.requires_state_diffs;
+    let mode_label = if use_state_diffs { "state-diffs" } else { "replay" };
     info!(
         portal = %portal_url,
         dataset = %dataset_name,
-        from = start_block,
-        to = to.map(|t| t.to_string()).unwrap_or_else(|| "∞".into()),
+        from = %fmt_num(start_block),
+        to = to.map(|t| fmt_num(t)).unwrap_or_else(|| "∞".into()),
+        mode = mode_label,
         "starting replay pipeline"
     );
 
-    let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(&portal_url, &dataset_name);
+    let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(&portal_url, &dataset_name)
+        .with_state_diffs(use_state_diffs);
     let blocks = fetcher.stream_blocks(start_block, to);
+
+    let pipeline_mode = if use_state_diffs {
+        evm_state_replayer::pipeline::PipelineMode::StateDiffs
+    } else {
+        evm_state_replayer::pipeline::PipelineMode::Replay(chain_spec)
+    };
 
     let log_interval = std::time::Duration::from_secs(log_interval);
     let mut last_log = std::time::Instant::now();
 
     let stats =
-        evm_state_replayer::pipeline::run_pipeline(&db, &chain_spec, blocks, |progress| {
+        evm_state_replayer::pipeline::run_pipeline(&db, &pipeline_mode, blocks, |progress| {
             if progress.blocks_processed == 1 || last_log.elapsed() >= log_interval {
+                let bps = progress.blocks_per_sec();
+                let eta = if let Some(to) = to {
+                    if bps > 0.0 && progress.block_number < to {
+                        let remaining = to - progress.block_number;
+                        let eta_secs = remaining as f64 / bps;
+                        fmt_eta(std::time::Duration::from_secs_f64(eta_secs))
+                    } else {
+                        "-".into()
+                    }
+                } else {
+                    "∞".into()
+                };
                 info!(
-                    block = progress.block_number,
-                    txs = progress.tx_count,
-                    processed = progress.blocks_processed,
-                    bps = format!("{:.1}", progress.blocks_per_sec()),
+                    block = %fmt_num(progress.block_number),
+                    processed = %fmt_num(progress.blocks_processed),
+                    bps = format!("{:.0}", bps),
+                    eta = %eta,
                     "replayed"
                 );
                 last_log = std::time::Instant::now();
@@ -320,9 +370,9 @@ async fn run_replay(
         .await?;
 
     info!(
-        blocks = stats.blocks_processed,
-        first = stats.first_block.unwrap_or(0),
-        last = stats.last_block.unwrap_or(0),
+        blocks = %fmt_num(stats.blocks_processed),
+        first = %fmt_num(stats.first_block.unwrap_or(0)),
+        last = %fmt_num(stats.last_block.unwrap_or(0)),
         elapsed = ?stats.elapsed,
         bps = format!("{:.1}", stats.blocks_per_sec()),
         "replay complete"
@@ -340,18 +390,18 @@ fn run_import(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
     let stats = evm_state_snapshot::import_snapshot(&db, file, |progress| {
         if progress.entries_imported % 100_000 == 0 && progress.entries_imported > 0 {
             info!(
-                entries = progress.entries_imported,
-                bytes = progress.bytes_read,
+                entries = %fmt_num(progress.entries_imported as u64),
+                bytes = %fmt_num(progress.bytes_read),
                 "import progress"
             );
         }
     })?;
 
     info!(
-        accounts = stats.accounts,
-        storage_slots = stats.storage_slots,
-        code_entries = stats.code_entries,
-        head_block = stats.head_block.unwrap_or(0),
+        accounts = %fmt_num(stats.accounts as u64),
+        storage_slots = %fmt_num(stats.storage_slots as u64),
+        code_entries = %fmt_num(stats.code_entries as u64),
+        head_block = %fmt_num(stats.head_block.unwrap_or(0)),
         elapsed = ?stats.elapsed,
         "import complete"
     );
@@ -368,17 +418,17 @@ fn run_export(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
     let stats = evm_state_snapshot::export_snapshot(&db, file, |progress| {
         if progress.entries_written % 100_000 == 0 && progress.entries_written > 0 {
             info!(
-                entries = progress.entries_written,
+                entries = %fmt_num(progress.entries_written as u64),
                 "export progress"
             );
         }
     })?;
 
     info!(
-        accounts = stats.accounts,
-        storage_slots = stats.storage_slots,
-        code_entries = stats.code_entries,
-        head_block = stats.head_block.unwrap_or(0),
+        accounts = %fmt_num(stats.accounts as u64),
+        storage_slots = %fmt_num(stats.storage_slots as u64),
+        code_entries = %fmt_num(stats.code_entries as u64),
+        head_block = %fmt_num(stats.head_block.unwrap_or(0)),
         elapsed = ?stats.elapsed,
         "export complete"
     );
@@ -397,7 +447,7 @@ fn run_genesis(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
 
     info!(
         file = %file.display(),
-        accounts = genesis.alloc.len(),
+        accounts = %fmt_num(genesis.alloc.len() as u64),
         "importing genesis allocations"
     );
 
@@ -438,9 +488,9 @@ fn run_genesis(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
     batch.commit()?;
 
     info!(
-        accounts,
-        storage_slots,
-        code_entries,
+        accounts = %fmt_num(accounts),
+        storage_slots = %fmt_num(storage_slots),
+        code_entries = %fmt_num(code_entries),
         "genesis import complete"
     );
 
@@ -464,14 +514,14 @@ fn run_validate(
         .get_head_block()?
         .context("database has no head block; import or replay first")?;
 
-    info!(rpc = %rpc_url, block = head, samples = samples, "starting validation");
+    info!(rpc = %rpc_url, block = %fmt_num(head), samples = %fmt_num(samples as u64), "starting validation");
 
     let rpc = evm_state_validation::EthRpcClient::new(&rpc_url);
     let report = evm_state_validation::validate_random(&db, &rpc, samples, head)?;
 
     info!(
-        total = report.total_checks(),
-        mismatches = report.mismatches(),
+        total = %fmt_num(report.total_checks() as u64),
+        mismatches = %fmt_num(report.mismatches() as u64),
         valid = report.is_valid(),
         "validation complete"
     );
@@ -607,7 +657,7 @@ mod tests {
                 assert!(dataset.is_none());
                 assert!(from.is_none());
                 assert!(to.is_none());
-                assert_eq!(log_interval, 15);
+                assert_eq!(log_interval, 10);
             }
             _ => panic!("expected Replay"),
         }

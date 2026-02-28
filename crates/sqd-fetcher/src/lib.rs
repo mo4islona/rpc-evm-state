@@ -33,12 +33,11 @@ pub enum Error {
 
 // ── Query builder ──────────────────────────────────────────────────
 
-fn build_query(from: u64, to: Option<u64>) -> serde_json::Value {
+fn build_query(from: u64, to: Option<u64>, state_diffs: bool) -> serde_json::Value {
     let mut query = json!({
         "type": "evm",
         "fromBlock": from,
         "includeAllBlocks": true,
-        "transactions": [{}],
         "fields": {
             "block": {
                 "number": true,
@@ -58,31 +57,45 @@ fn build_query(from: u64, to: Option<u64>) -> serde_json::Value {
                 "transactionsRoot": true,
                 "receiptsRoot": true,
                 "size": true
-            },
-            "transaction": {
-                "transactionIndex": true,
-                "hash": true,
-                "from": true,
-                "to": true,
-                "input": true,
-                "value": true,
-                "nonce": true,
-                "gas": true,
-                "gasPrice": true,
-                "maxFeePerGas": true,
-                "maxPriorityFeePerGas": true,
-                "yParity": true,
-                "chainId": true,
-                "gasUsed": true,
-                "cumulativeGasUsed": true,
-                "effectiveGasPrice": true,
-                "contractAddress": true,
-                "type": true,
-                "status": true,
-                "sighash": true
             }
         }
     });
+
+    if state_diffs {
+        query["stateDiffs"] = json!([{}]);
+        query["fields"]["stateDiff"] = json!({
+            "transactionIndex": true,
+            "address": true,
+            "key": true,
+            "kind": true,
+            "next": true
+        });
+    } else {
+        query["transactions"] = json!([{}]);
+        query["fields"]["transaction"] = json!({
+            "transactionIndex": true,
+            "hash": true,
+            "from": true,
+            "to": true,
+            "input": true,
+            "value": true,
+            "nonce": true,
+            "gas": true,
+            "gasPrice": true,
+            "maxFeePerGas": true,
+            "maxPriorityFeePerGas": true,
+            "yParity": true,
+            "chainId": true,
+            "gasUsed": true,
+            "cumulativeGasUsed": true,
+            "effectiveGasPrice": true,
+            "contractAddress": true,
+            "type": true,
+            "status": true,
+            "sighash": true
+        });
+    }
+
     if let Some(to) = to {
         query["toBlock"] = json!(to);
     }
@@ -125,6 +138,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 pub struct SqdFetcher {
     client: reqwest::Client,
     portal_url: String,
+    use_state_diffs: bool,
 }
 
 impl SqdFetcher {
@@ -146,7 +160,14 @@ impl SqdFetcher {
         Self {
             client: reqwest::Client::new(),
             portal_url: stream_url.trim_end_matches('/').to_string(),
+            use_state_diffs: false,
         }
+    }
+
+    /// Enable state-diffs mode: query `stateDiffs` instead of `transactions`.
+    pub fn with_state_diffs(mut self, enabled: bool) -> Self {
+        self.use_state_diffs = enabled;
+        self
     }
 
     /// Start a request with retries on transient errors (server 5xx, timeouts,
@@ -156,7 +177,7 @@ impl SqdFetcher {
         from: u64,
         to: Option<u64>,
     ) -> Result<reqwest::Response, Error> {
-        let query = build_query(from, to);
+        let query = build_query(from, to, self.use_state_diffs);
 
         let mut last_error = None;
         for attempt in 0..MAX_RETRIES {
@@ -329,7 +350,7 @@ mod tests {
 
     #[test]
     fn build_query_without_to() {
-        let query = build_query(100, None);
+        let query = build_query(100, None, false);
         assert_eq!(query["type"], "evm");
         assert_eq!(query["fromBlock"], 100);
         assert!(query.get("toBlock").is_none());
@@ -341,10 +362,23 @@ mod tests {
 
     #[test]
     fn build_query_with_to() {
-        let query = build_query(100, Some(200));
+        let query = build_query(100, Some(200), false);
         assert_eq!(query["type"], "evm");
         assert_eq!(query["fromBlock"], 100);
         assert_eq!(query["toBlock"], 200);
+    }
+
+    #[test]
+    fn build_query_state_diffs_mode() {
+        let query = build_query(100, None, true);
+        assert_eq!(query["type"], "evm");
+        assert!(query["stateDiffs"].is_array());
+        assert!(query.get("transactions").is_none());
+        assert!(query["fields"]["stateDiff"]["address"].as_bool().unwrap());
+        assert!(query["fields"]["stateDiff"]["key"].as_bool().unwrap());
+        assert!(query["fields"]["stateDiff"]["kind"].as_bool().unwrap());
+        assert!(query["fields"]["stateDiff"]["next"].as_bool().unwrap());
+        assert!(query["fields"].get("transaction").is_none());
     }
 
     #[test]

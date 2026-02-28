@@ -11,6 +11,7 @@ evm-state-chain-spec = { workspace = true }
 alloy-primitives = { workspace = true }
 revm = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]

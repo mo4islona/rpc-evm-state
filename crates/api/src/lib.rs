@@ -602,6 +602,7 @@ mod tests {
                     condition: evm_state_chain_spec::HardforkCondition::Block(0),
                     spec_id: revm::primitives::hardfork::SpecId::SHANGHAI,
                 }],
+                requires_state_diffs: false,
             },
         });
         (dir, state)

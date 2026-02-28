@@ -17,6 +17,7 @@ pub(crate) fn simple_chain_spec() -> ChainSpec {
             condition: evm_state_chain_spec::HardforkCondition::Block(0),
             spec_id: revm::primitives::hardfork::SpecId::SHANGHAI,
         }],
+        requires_state_diffs: false,
     }
 }
 
@@ -43,6 +44,7 @@ pub(crate) fn simple_block(number: u64, txs: Vec<Transaction>) -> Block {
             l1_block_number: None,
         },
         transactions: txs,
+        state_diffs: vec![],
     }
 }
 

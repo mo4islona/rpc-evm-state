@@ -540,6 +540,7 @@ mod tests {
                     condition: HardforkCondition::Block(0),
                     spec_id: SpecId::SHANGHAI,
                 }],
+                requires_state_diffs: false,
             },
         });
         (dir, state)

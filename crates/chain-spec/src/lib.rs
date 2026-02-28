@@ -26,6 +26,10 @@ pub struct ChainSpec {
     pub name: &'static str,
     /// Sorted chronologically — block-based activations first, then timestamp-based.
     pub hardforks: Vec<HardforkActivation>,
+    /// Whether this chain requires state-diffs mode instead of transaction replay.
+    /// True for chains like Polygon where consensus-injected state sync
+    /// transactions are missing from the SQD portal's transaction stream.
+    pub requires_state_diffs: bool,
 }
 
 impl ChainSpec {
@@ -111,6 +115,7 @@ pub fn polygon_mainnet() -> ChainSpec {
                 spec_id: SpecId::PRAGUE,
             },
         ],
+        requires_state_diffs: true,
     }
 }
 
@@ -204,6 +209,7 @@ pub fn ethereum_mainnet() -> ChainSpec {
                 spec_id: SpecId::PRAGUE,
             },
         ],
+        requires_state_diffs: false,
     }
 }
 

@@ -15,6 +15,9 @@ pub struct Block {
 
     #[serde(default)]
     pub transactions: Vec<Transaction>,
+
+    #[serde(default, rename = "stateDiffs")]
+    pub state_diffs: Vec<StateDiff>,
 }
 
 /// Block header from SQD Network.

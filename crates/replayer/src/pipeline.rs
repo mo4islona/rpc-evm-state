@@ -1,4 +1,4 @@
-use crate::{replay_block, Error, Result};
+use crate::{apply_state_diffs, replay_block, Error, Result};
 use evm_state_chain_spec::ChainSpec;
 use evm_state_data_types::Block;
 use evm_state_db::StateDb;
@@ -6,6 +6,14 @@ use futures::stream::Stream;
 use futures::StreamExt;
 use std::fmt;
 use std::time::Instant;
+
+/// Controls how blocks are processed in the pipeline.
+pub enum PipelineMode {
+    /// Execute transactions with revm (normal replay).
+    Replay(ChainSpec),
+    /// Apply state diffs directly from the portal (no EVM execution).
+    StateDiffs,
+}
 
 /// Summary statistics from a pipeline run.
 #[derive(Debug, Clone)]
@@ -71,7 +79,7 @@ impl BlockProgress {
 /// blocks is always safe.
 pub async fn run_pipeline<S, E, F>(
     db: &StateDb,
-    chain_spec: &ChainSpec,
+    mode: &PipelineMode,
     blocks: S,
     mut on_progress: F,
 ) -> Result<PipelineStats>
@@ -113,8 +121,18 @@ where
             }
         }
 
-        let tx_count = block.transactions.len();
-        replay_block(db, &block, chain_spec)?;
+        let tx_count = match mode {
+            PipelineMode::Replay(chain_spec) => {
+                let count = block.transactions.len();
+                replay_block(db, &block, chain_spec)?;
+                count
+            }
+            PipelineMode::StateDiffs => {
+                let count = block.state_diffs.len();
+                apply_state_diffs(db, &block)?;
+                count
+            }
+        };
 
         stats.blocks_processed += 1;
         if stats.first_block.is_none() {
@@ -153,7 +171,7 @@ mod tests {
         let blocks: Vec<std::result::Result<_, std::convert::Infallible>> =
             (1..=5).map(|n| Ok(simple_block(n, vec![]))).collect();
 
-        let stats = run_pipeline(&db, &spec, futures::stream::iter(blocks), |_| true)
+        let stats = run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |_| true)
             .await
             .unwrap();
 
@@ -174,7 +192,7 @@ mod tests {
         let blocks: Vec<std::result::Result<_, std::convert::Infallible>> =
             (1..=6).map(|n| Ok(simple_block(n, vec![]))).collect();
 
-        let stats = run_pipeline(&db, &spec, futures::stream::iter(blocks), |_| true)
+        let stats = run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |_| true)
             .await
             .unwrap();
 
@@ -192,7 +210,7 @@ mod tests {
         let blocks: Vec<std::result::Result<_, std::convert::Infallible>> =
             (1..=100).map(|n| Ok(simple_block(n, vec![]))).collect();
 
-        let stats = run_pipeline(&db, &spec, futures::stream::iter(blocks), |p| {
+        let stats = run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |p| {
             p.blocks_processed < 5
         })
         .await
@@ -215,7 +233,7 @@ mod tests {
             Ok(simple_block(4, vec![])),
         ];
 
-        let result = run_pipeline(&db, &spec, futures::stream::iter(blocks), |_| true).await;
+        let result = run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |_| true).await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Source(_)));
@@ -229,7 +247,7 @@ mod tests {
         let spec = simple_chain_spec();
         let blocks: Vec<std::result::Result<_, std::convert::Infallible>> = vec![];
 
-        let stats = run_pipeline(&db, &spec, futures::stream::iter(blocks), |_| true)
+        let stats = run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |_| true)
             .await
             .unwrap();
 
@@ -249,7 +267,7 @@ mod tests {
             Ok(simple_block(5, vec![])), // gap: 3 and 4 missing
         ];
 
-        let result = run_pipeline(&db, &spec, futures::stream::iter(blocks), |_| true).await;
+        let result = run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |_| true).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -309,7 +327,7 @@ mod tests {
             Ok(simple_block(2, vec![tx1])),
         ];
 
-        let stats = run_pipeline(&db, &spec, futures::stream::iter(blocks), |_| true)
+        let stats = run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |_| true)
             .await
             .unwrap();
 
@@ -330,7 +348,7 @@ mod tests {
             (1..=3).map(|n| Ok(simple_block(n, vec![]))).collect();
 
         let mut progress_reports = Vec::new();
-        run_pipeline(&db, &spec, futures::stream::iter(blocks), |p| {
+        run_pipeline(&db, &PipelineMode::Replay(spec.clone()), futures::stream::iter(blocks), |p| {
             progress_reports.push(p.clone());
             true
         })
