@@ -51,6 +51,17 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     let mut tx_results = Vec::with_capacity(block.transactions.len());
 
     for (idx, tx) in block.transactions.iter().enumerate() {
+        // Skip system transactions (e.g. Polygon Bor state sync).
+        // These are injected by the consensus layer with from=0x0 and gas=0,
+        // and their state effects are applied outside the EVM.
+        if is_system_tx(tx) {
+            tx_results.push(TxResult {
+                gas_used: 0,
+                success: true,
+            });
+            continue;
+        }
+
         let tx_env = tx_env_from_transaction(tx, chain_spec.chain_id);
 
         // Create a fresh EVM context per transaction (clean journal).
@@ -59,6 +70,9 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
             let ctx: revm::handler::MainnetContext<&mut CacheDB<&StateDb>> =
                 Context::new(&mut cache_db, spec_id);
             let ctx = ctx
+                .modify_cfg_chained(|c: &mut revm::context::CfgEnv| {
+                    c.chain_id = chain_spec.chain_id;
+                })
                 .modify_block_chained(|b: &mut revm::context::BlockEnv| *b = block_env.clone())
                 .modify_tx_chained(|t: &mut revm::context::TxEnv| *t = tx_env);
             let mut evm = ctx.build_mainnet();
@@ -85,7 +99,18 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     })
 }
 
-use evm_state_data_types::Block;
+use evm_state_data_types::{Block, Transaction};
+
+/// Detect system transactions injected by the consensus layer.
+///
+/// On Polygon (Bor), state sync transactions are submitted by the zero address
+/// with zero gas. These aren't real EVM transactions — the state changes are
+/// applied by the client outside normal EVM execution.
+fn is_system_tx(tx: &Transaction) -> bool {
+    let from_zero = tx.from.map_or(false, |a| a.is_zero());
+    let gas_zero = tx.gas.map_or(true, |g| g.as_u64() == 0);
+    from_zero && gas_zero
+}
 
 /// Write CacheDB contents to StateDb via a single WriteBatch.
 fn flush_cache_to_db(

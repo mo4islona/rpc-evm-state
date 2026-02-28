@@ -12,10 +12,11 @@ State is populated by replaying blocks from the [Subsquid Network](https://docs.
 
 ## How It Works
 
-**State population** follows one of two paths:
+**State population** starts with genesis allocations, then builds state incrementally:
 
-1. **Replay** — The SQD fetcher streams blocks from the Subsquid Network. The replayer executes every transaction with revm and commits the resulting state changes to the database, block by block.
-2. **Snapshot import** — A pre-built state dump (JSON Lines, optionally zstd-compressed) is loaded directly into the database, then incremental replay continues from the snapshot's head block.
+1. **Genesis** — Import the chain's `genesis.json` to seed initial accounts, balances, and system contracts.
+2. **Replay** — The SQD fetcher streams blocks from the Subsquid Network. The replayer executes every transaction with revm and commits the resulting state changes to the database, block by block.
+3. **Snapshot import** (alternative) — A pre-built state dump (JSON Lines, optionally zstd-compressed) is loaded directly into the database, then incremental replay continues from the snapshot's head block.
 
 **Serving a client call** (e.g. `balanceOf`):
 
@@ -31,24 +32,34 @@ State is populated by replaying blocks from the [Subsquid Network](https://docs.
 
 ## Quick Start
 
+Index the first 2 million Polygon blocks from scratch:
+
 ```sh
-# Build everything
-cargo build --release
+# Download the Polygon genesis file (contains initial account allocations)
+curl -Lo genesis.json \
+  https://raw.githubusercontent.com/maticnetwork/bor/develop/builder/files/genesis-mainnet-v1.json
 
-# Import a state snapshot
-evm-state --db ./polygon.mdbx import snapshot.jsonl.zst
+# Import genesis allocations into the database
+cargo run --release --bin evm-state -- --db ./polygon.mdbx genesis genesis.json
 
-# Or replay from the SQD Network (Polygon by default)
-evm-state --db ./polygon.mdbx replay --from 65000000
+# Replay blocks 1 → 2,000,000 from the Subsquid Network
+cargo run --release --bin evm-state -- --db ./polygon.mdbx replay --to 2000000
 
 # Start the API server
-evm-state --db ./polygon.mdbx serve --listen 0.0.0.0:3000
+cargo run --release --bin evm-state -- --db ./polygon.mdbx serve --listen 0.0.0.0:3000
+```
 
-# Export state to a snapshot (plain or zstd-compressed)
-evm-state --db ./polygon.mdbx export snapshot.jsonl.zst
+### Other commands
 
-# Validate state against an archive RPC
-evm-state --db ./polygon.mdbx validate --rpc-url https://polygon-rpc.com --samples 100
+```sh
+# Import a pre-built state snapshot (skips replay)
+cargo run --release --bin evm-state -- --db ./polygon.mdbx import snapshot.jsonl.zst
+
+# Export current state to a snapshot
+cargo run --release --bin evm-state -- --db ./polygon.mdbx export snapshot.jsonl.zst
+
+# Validate local state against an archive RPC
+cargo run --release --bin evm-state -- --db ./polygon.mdbx validate --rpc-url https://polygon-rpc.com --samples 100
 ```
 
 ## Configuration
@@ -125,7 +136,7 @@ crates/
   client-wasm/     WASM-compiled client with JS bindings
   validation/      State validator (random sampling, binary search)
   bench/           Benchmarks (criterion)
-  cli/             Unified CLI binary (serve, replay, import, validate)
+  cli/             Unified CLI binary (genesis, replay, serve, import, export, validate)
 
 packages/
   evm-state/       TypeScript SDK (@sqd/evm-state) wrapping WASM client

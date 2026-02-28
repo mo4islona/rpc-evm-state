@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use alloy_primitives::{Address, B256, U256};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -27,6 +29,82 @@ fn load_config(path: &std::path::Path) -> Result<Config> {
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
     toml::from_str(&contents)
         .with_context(|| format!("failed to parse config file: {}", path.display()))
+}
+
+// ── Genesis file types ─────────────────────────────────────────────
+
+/// Standard Geth/Bor genesis.json format (only the fields we need).
+#[derive(Debug, Deserialize)]
+struct GenesisFile {
+    alloc: HashMap<Address, GenesisAccount>,
+}
+
+/// A single account entry in the genesis `alloc` section.
+#[derive(Debug, Deserialize)]
+struct GenesisAccount {
+    #[serde(default, deserialize_with = "deserialize_balance")]
+    balance: Option<U256>,
+    #[serde(default, deserialize_with = "deserialize_optional_code")]
+    code: Option<Vec<u8>>,
+    #[serde(default)]
+    storage: Option<HashMap<B256, U256>>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64_hex")]
+    nonce: Option<u64>,
+}
+
+fn deserialize_balance<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<U256>, D::Error> {
+    let s: Option<String> = Option::deserialize(d)?;
+    match s {
+        None => Ok(None),
+        Some(s) => {
+            let s = s.trim();
+            if s.is_empty() || s == "0" || s == "0x0" {
+                return Ok(Some(U256::ZERO));
+            }
+            // Geth uses "0x..." hex strings for balance
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                U256::from_str_radix(hex, 16)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            } else {
+                // Decimal string
+                U256::from_str_radix(&s, 10)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
+fn deserialize_optional_code<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Vec<u8>>, D::Error> {
+    let s: Option<String> = Option::deserialize(d)?;
+    match s {
+        None => Ok(None),
+        Some(s) => {
+            let hex = s.strip_prefix("0x").unwrap_or(&s);
+            hex::decode(hex).map(Some).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+fn deserialize_optional_u64_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
+    let val: Option<serde_json::Value> = Option::deserialize(d)?;
+    match val {
+        None => Ok(None),
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64()),
+        Some(serde_json::Value::String(s)) => {
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            } else {
+                s.parse::<u64>()
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+        _ => Err(serde::de::Error::custom("expected number or hex string for nonce")),
+    }
 }
 
 // ── CLI definition ──────────────────────────────────────────────────
@@ -81,6 +159,10 @@ enum Command {
         /// Stop replay at this block (default: open-ended).
         #[arg(long)]
         to: Option<u64>,
+
+        /// Seconds between progress log lines (default: 10).
+        #[arg(long, default_value = "10")]
+        log_interval: u64,
     },
 
     /// Import a JSON Lines snapshot into the state database.
@@ -92,6 +174,12 @@ enum Command {
     /// Export the state database to a JSON Lines snapshot.
     Export {
         /// Output path (.jsonl or .jsonl.zst for compressed).
+        file: PathBuf,
+    },
+
+    /// Import genesis allocations from a genesis.json file.
+    Genesis {
+        /// Path to genesis.json (Geth/Bor format).
         file: PathBuf,
     },
 
@@ -181,6 +269,7 @@ async fn run_replay(
     dataset: Option<String>,
     from: Option<u64>,
     to: Option<u64>,
+    log_interval: u64,
 ) -> Result<()> {
     let portal_url = portal
         .or_else(|| config.portal.clone())
@@ -211,9 +300,12 @@ async fn run_replay(
     let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(&portal_url, &dataset_name);
     let blocks = fetcher.stream_blocks(start_block, to);
 
+    let log_interval = std::time::Duration::from_secs(log_interval);
+    let mut last_log = std::time::Instant::now();
+
     let stats =
         evm_state_replayer::pipeline::run_pipeline(&db, &chain_spec, blocks, |progress| {
-            if progress.blocks_processed % 100 == 0 || progress.blocks_processed == 1 {
+            if progress.blocks_processed == 1 || last_log.elapsed() >= log_interval {
                 info!(
                     block = progress.block_number,
                     txs = progress.tx_count,
@@ -221,6 +313,7 @@ async fn run_replay(
                     bps = format!("{:.1}", progress.blocks_per_sec()),
                     "replayed"
                 );
+                last_log = std::time::Instant::now();
             }
             true
         })
@@ -288,6 +381,67 @@ fn run_export(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
         head_block = stats.head_block.unwrap_or(0),
         elapsed = ?stats.elapsed,
         "export complete"
+    );
+
+    Ok(())
+}
+
+fn run_genesis(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
+    let contents = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read genesis file: {}", file.display()))?;
+    let genesis: GenesisFile = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse genesis file: {}", file.display()))?;
+
+    let db = evm_state_db::StateDb::open(&resolved.db_path)
+        .with_context(|| format!("failed to open database at {}", resolved.db_path))?;
+
+    info!(
+        file = %file.display(),
+        accounts = genesis.alloc.len(),
+        "importing genesis allocations"
+    );
+
+    let batch = db.write_batch()?;
+    let mut accounts = 0u64;
+    let mut storage_slots = 0u64;
+    let mut code_entries = 0u64;
+
+    for (address, account) in &genesis.alloc {
+        let code_hash = if let Some(code) = &account.code {
+            let hash = alloy_primitives::keccak256(code);
+            if !code.is_empty() {
+                batch.set_code(&hash.into(), code)?;
+                code_entries += 1;
+            }
+            hash.into()
+        } else {
+            B256::ZERO
+        };
+
+        let info = evm_state_common::AccountInfo {
+            nonce: account.nonce.unwrap_or(0),
+            balance: account.balance.unwrap_or(U256::ZERO),
+            code_hash,
+        };
+        batch.set_account(address, &info)?;
+        accounts += 1;
+
+        if let Some(storage) = &account.storage {
+            for (slot, value) in storage {
+                batch.set_storage(address, slot, value)?;
+                storage_slots += 1;
+            }
+        }
+    }
+
+    batch.set_head_block(0)?;
+    batch.commit()?;
+
+    info!(
+        accounts,
+        storage_slots,
+        code_entries,
+        "genesis import complete"
     );
 
     Ok(())
@@ -382,9 +536,11 @@ async fn main() -> Result<()> {
             dataset,
             from,
             to,
-        } => run_replay(&resolved, &config, portal, dataset, from, to).await,
+            log_interval,
+        } => run_replay(&resolved, &config, portal, dataset, from, to, log_interval).await,
         Command::Import { file } => run_import(&resolved, &file),
         Command::Export { file } => run_export(&resolved, &file),
+        Command::Genesis { file } => run_genesis(&resolved, &file),
         Command::Validate { rpc_url, samples } => run_validate(&resolved, &config, rpc_url, samples),
     }
 }
@@ -445,11 +601,13 @@ mod tests {
                 dataset,
                 from,
                 to,
+                log_interval,
             } => {
                 assert!(portal.is_none());
                 assert!(dataset.is_none());
                 assert!(from.is_none());
                 assert!(to.is_none());
+                assert_eq!(log_interval, 15);
             }
             _ => panic!("expected Replay"),
         }
@@ -477,6 +635,7 @@ mod tests {
                 dataset,
                 from,
                 to,
+                ..
             } => {
                 assert_eq!(portal.as_deref(), Some("https://custom.sqd.dev"));
                 assert_eq!(dataset.as_deref(), Some("custom-dataset"));
@@ -513,6 +672,72 @@ mod tests {
     #[test]
     fn parse_export_missing_file_fails() {
         assert!(Cli::try_parse_from(["evm-state", "export"]).is_err());
+    }
+
+    #[test]
+    fn parse_genesis() {
+        let cli = Cli::try_parse_from(["evm-state", "genesis", "/tmp/genesis.json"]).unwrap();
+        match cli.command {
+            Command::Genesis { file } => assert_eq!(file, PathBuf::from("/tmp/genesis.json")),
+            _ => panic!("expected Genesis"),
+        }
+    }
+
+    #[test]
+    fn parse_genesis_missing_file_fails() {
+        assert!(Cli::try_parse_from(["evm-state", "genesis"]).is_err());
+    }
+
+    #[test]
+    fn deserialize_genesis_file() {
+        let json = r#"{
+            "alloc": {
+                "0000000000000000000000000000000000001010": {
+                    "balance": "0x204fcce2c5a141f7f9a00000",
+                    "code": "0x6080"
+                },
+                "5973918275C01F50555d44e92c9d9b353CaDAD54": {
+                    "balance": "0x3635c9adc5dea00000"
+                }
+            }
+        }"#;
+        let genesis: GenesisFile = serde_json::from_str(json).unwrap();
+        assert_eq!(genesis.alloc.len(), 2);
+
+        let matic = genesis.alloc.iter()
+            .find(|(a, _)| a.to_string().contains("1010"))
+            .unwrap().1;
+        assert!(matic.balance.unwrap() > U256::ZERO);
+        assert_eq!(matic.code.as_ref().unwrap(), &[0x60, 0x80]);
+
+        let funded = genesis.alloc.iter()
+            .find(|(a, _)| a.to_string().to_lowercase().contains("5973"))
+            .unwrap().1;
+        assert!(funded.balance.unwrap() > U256::ZERO);
+        assert!(funded.code.is_none());
+    }
+
+    #[test]
+    fn deserialize_genesis_with_storage_and_nonce() {
+        let json = r#"{
+            "alloc": {
+                "0000000000000000000000000000000000000001": {
+                    "balance": "0x100",
+                    "nonce": "0x5",
+                    "storage": {
+                        "0x0000000000000000000000000000000000000000000000000000000000000001": "0x0000000000000000000000000000000000000000000000000000000000000042"
+                    }
+                }
+            }
+        }"#;
+        let genesis: GenesisFile = serde_json::from_str(json).unwrap();
+        assert_eq!(genesis.alloc.len(), 1);
+
+        let (_, account) = genesis.alloc.iter().next().unwrap();
+        assert_eq!(account.balance.unwrap(), U256::from(0x100));
+        assert_eq!(account.nonce.unwrap(), 5);
+        let storage = account.storage.as_ref().unwrap();
+        assert_eq!(storage.len(), 1);
     }
 
     #[test]

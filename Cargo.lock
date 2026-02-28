@@ -1672,17 +1672,21 @@ dependencies = [
 name = "evm-state-cli"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "axum",
  "clap",
  "evm-state-api",
  "evm-state-chain-spec",
+ "evm-state-common",
  "evm-state-db",
  "evm-state-replayer",
  "evm-state-snapshot",
  "evm-state-sqd-fetcher",
  "evm-state-validation",
+ "hex",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
