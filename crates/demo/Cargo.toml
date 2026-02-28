@@ -1,0 +1,18 @@
+[package]
+name = "evm-state-demo"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Uniswap V3 pool reader demo using the EVM state service"
+
+[[bin]]
+name = "uniswap-v3-reader"
+path = "src/main.rs"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+evm-state-client = { workspace = true }
+revm = { workspace = true }
+anyhow = { workspace = true }

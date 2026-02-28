@@ -10,6 +10,7 @@ repository = "https://github.com/subsquid/rpc-evm-state"
 [workspace.dependencies]
 # EVM
 alloy-primitives = { version = "1", features = ["serde"] }
+alloy-sol-types = "1"
 revm = "24"
 
 # Serialization
@@ -35,6 +36,12 @@ js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Compression
 zstd = "0.13"
 
@@ -53,6 +60,8 @@ evm-state-sqd-fetcher = { path = "crates/sqd-fetcher" }
 evm-state-snapshot = { path = "crates/snapshot" }
 evm-state-validation = { path = "crates/validation" }
 evm-state-client-wasm = { path = "crates/client-wasm" }
+evm-state-bench = { path = "crates/bench" }
+evm-state-cli = { path = "crates/cli" }
 
 [profile.release]
 opt-level = 'z'

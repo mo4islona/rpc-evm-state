@@ -1,0 +1,21 @@
+{
+  "name": "@sqd/evm-state-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Uniswap V3 pool reader demo using @sqd/evm-state SDK",
+  "license": "MIT",
+  "scripts": {
+    "demo": "npx tsx src/index.ts",
+    "demo:viem": "npx tsx src/viem-transport.ts"
+  },
+  "dependencies": {
+    "@sqd/evm-state": "file:../evm-state",
+    "viem": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
