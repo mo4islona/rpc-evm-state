@@ -170,6 +170,32 @@ impl SqdFetcher {
         self
     }
 
+    /// Query the portal for the latest available block number.
+    ///
+    /// Sends a minimal request and reads the `X-SQD-HEAD-NUMBER` response header.
+    pub async fn get_head_block(&self) -> Result<Option<u64>, Error> {
+        let query = json!({
+            "type": "evm",
+            "fromBlock": 0,
+            "toBlock": 0,
+        });
+        let resp = self
+            .client
+            .post(&self.portal_url)
+            .json(&query)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|e| Error::Portal(format!("portal error: {e}")))?;
+
+        let head = resp
+            .headers()
+            .get("x-sqd-head-number")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+        Ok(head)
+    }
+
     /// Start a request with retries on transient errors (server 5xx, timeouts,
     /// connection failures). Returns the response ready for streaming.
     async fn start_request(

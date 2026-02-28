@@ -319,17 +319,26 @@ async fn run_replay(
 
     let use_state_diffs = chain_spec.requires_state_diffs;
     let mode_label = if use_state_diffs { "state-diffs" } else { "replay" };
+
+    let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(&portal_url, &dataset_name)
+        .with_state_diffs(use_state_diffs);
+
+    // Determine the target block for ETA calculation.
+    // Use --to if specified, otherwise query the portal for the latest available block.
+    let target_block = match to {
+        Some(t) => Some(t),
+        None => fetcher.get_head_block().await.unwrap_or(None),
+    };
+
     info!(
         portal = %portal_url,
         dataset = %dataset_name,
         from = %fmt_num(start_block),
-        to = to.map(|t| fmt_num(t)).unwrap_or_else(|| "∞".into()),
+        to = target_block.map(|t| fmt_num(t)).unwrap_or_else(|| "∞".into()),
         mode = mode_label,
         "starting replay pipeline"
     );
 
-    let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(&portal_url, &dataset_name)
-        .with_state_diffs(use_state_diffs);
     let blocks = fetcher.stream_blocks(start_block, to);
 
     let pipeline_mode = if use_state_diffs {
@@ -345,23 +354,30 @@ async fn run_replay(
         evm_state_replayer::pipeline::run_pipeline(&db, &pipeline_mode, blocks, |progress| {
             if progress.blocks_processed == 1 || last_log.elapsed() >= log_interval {
                 let bps = progress.blocks_per_sec();
-                let eta = if let Some(to) = to {
-                    if bps > 0.0 && progress.block_number < to {
-                        let remaining = to - progress.block_number;
-                        let eta_secs = remaining as f64 / bps;
-                        fmt_eta(std::time::Duration::from_secs_f64(eta_secs))
+                let (pct, eta) = if let Some(target) = target_block {
+                    let total = target.saturating_sub(start_block);
+                    let done = progress.block_number.saturating_sub(start_block);
+                    let pct = if total > 0 {
+                        format!("{:.1}%", done as f64 / total as f64 * 100.0)
+                    } else {
+                        "100%".into()
+                    };
+                    let eta = if bps > 0.0 && progress.block_number < target {
+                        let remaining = target - progress.block_number;
+                        fmt_eta(std::time::Duration::from_secs_f64(remaining as f64 / bps))
                     } else {
                         "-".into()
-                    }
+                    };
+                    (pct, eta)
                 } else {
-                    "∞".into()
+                    ("-".into(), "-".into())
                 };
                 info!(
-                    block = %fmt_num(progress.block_number),
-                    processed = %fmt_num(progress.blocks_processed),
-                    bps = format!("{:.0}", bps),
+                    block = %format!("{}/{}", fmt_num(progress.block_number), target_block.map(|t| fmt_num(t)).unwrap_or_else(|| "∞".into())),
+                    progress = %pct,
                     eta = %eta,
-                    "replayed"
+                    bps = format!("{:.0}", bps),
+                    "replaying"
                 );
                 last_log = std::time::Instant::now();
             }
