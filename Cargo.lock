@@ -1321,6 +1321,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "evm-state-snapshot"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "evm-state-common",
+ "evm-state-db",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
 name = "evm-state-sqd-fetcher"
 version = "0.1.0"
 dependencies = [
