@@ -135,7 +135,10 @@ fn make_sload_return_bytecode() -> Vec<u8> {
 ///
 /// For each slot i: PUSH slot_i → SLOAD → POP (except last which goes to MSTORE → RETURN)
 fn make_multi_sload_bytecode(num_slots: usize) -> Vec<u8> {
-    assert!(num_slots > 0 && num_slots <= 256, "num_slots must be 1..=256");
+    assert!(
+        num_slots > 0 && num_slots <= 256,
+        "num_slots must be 1..=256"
+    );
     let mut code = Vec::new();
 
     for i in 0..num_slots {

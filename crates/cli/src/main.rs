@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use tracing::{error, info};
@@ -52,7 +52,9 @@ struct GenesisAccount {
     nonce: Option<u64>,
 }
 
-fn deserialize_balance<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<U256>, D::Error> {
+fn deserialize_balance<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<U256>, D::Error> {
     let s: Option<String> = Option::deserialize(d)?;
     match s {
         None => Ok(None),
@@ -76,7 +78,9 @@ fn deserialize_balance<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::R
     }
 }
 
-fn deserialize_optional_code<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Vec<u8>>, D::Error> {
+fn deserialize_optional_code<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<Vec<u8>>, D::Error> {
     let s: Option<String> = Option::deserialize(d)?;
     match s {
         None => Ok(None),
@@ -87,7 +91,9 @@ fn deserialize_optional_code<'de, D: serde::Deserializer<'de>>(d: D) -> std::res
     }
 }
 
-fn deserialize_optional_u64_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
+fn deserialize_optional_u64_hex<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<u64>, D::Error> {
     let val: Option<serde_json::Value> = Option::deserialize(d)?;
     match val {
         None => Ok(None),
@@ -98,12 +104,12 @@ fn deserialize_optional_u64_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::
                     .map(Some)
                     .map_err(serde::de::Error::custom)
             } else {
-                s.parse::<u64>()
-                    .map(Some)
-                    .map_err(serde::de::Error::custom)
+                s.parse::<u64>().map(Some).map_err(serde::de::Error::custom)
             }
         }
-        _ => Err(serde::de::Error::custom("expected number or hex string for nonce")),
+        _ => Err(serde::de::Error::custom(
+            "expected number or hex string for nonce",
+        )),
     }
 }
 
@@ -160,9 +166,9 @@ enum Command {
         #[arg(long)]
         to: Option<u64>,
 
-        /// Seconds between progress log lines (default: 10).
-        #[arg(long, default_value = "10")]
-        log_interval: u64,
+        /// Use plain text logging instead of the TUI progress bar.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// Import a JSON Lines snapshot into the state database.
@@ -214,10 +220,7 @@ impl Resolved {
                 .clone()
                 .or_else(|| config.db_path.clone())
                 .unwrap_or_else(|| "./state.mdbx".to_string()),
-            chain_id: cli
-                .chain_id
-                .or(config.chain_id)
-                .unwrap_or(137),
+            chain_id: cli.chain_id.or(config.chain_id).unwrap_or(137),
             log_level: cli
                 .log_level
                 .clone()
@@ -297,7 +300,7 @@ async fn run_replay(
     dataset: Option<String>,
     from: Option<u64>,
     to: Option<u64>,
-    log_interval: u64,
+    plain: bool,
 ) -> Result<()> {
     let portal_url = portal
         .or_else(|| config.portal.clone())
@@ -318,7 +321,12 @@ async fn run_replay(
     let start_block = from.or(head.map(|h| h + 1)).unwrap_or(0);
 
     let use_state_diffs = chain_spec.requires_state_diffs;
-    let mode_label = if use_state_diffs { "state-diffs" } else { "replay" };
+    let mode_label = if use_state_diffs {
+        "state-diffs"
+    } else {
+        "replay"
+    };
+    let chain_spec_name = chain_spec.name;
 
     let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(&portal_url, &dataset_name)
         .with_state_diffs(use_state_diffs);
@@ -330,14 +338,9 @@ async fn run_replay(
         None => fetcher.get_head_block().await.unwrap_or(None),
     };
 
-    info!(
-        portal = %portal_url,
-        dataset = %dataset_name,
-        from = %fmt_num(start_block),
-        to = target_block.map(|t| fmt_num(t)).unwrap_or_else(|| "∞".into()),
-        mode = mode_label,
-        "starting replay pipeline"
-    );
+    let target_label = target_block
+        .map(|t| fmt_num(t))
+        .unwrap_or_else(|| "∞".into());
 
     let blocks = fetcher.stream_blocks(start_block, to);
 
@@ -347,52 +350,145 @@ async fn run_replay(
         evm_state_replayer::pipeline::PipelineMode::Replay(chain_spec)
     };
 
-    let log_interval = std::time::Duration::from_secs(log_interval);
-    let mut last_log = std::time::Instant::now();
+    if plain {
+        // ── Plain text logging ──────────────────────────────────────
+        info!(
+            chain = chain_spec_name,
+            chain_id = resolved.chain_id,
+            mode = mode_label,
+            from = start_block,
+            to = %target_label,
+            "starting replay"
+        );
 
-    let stats =
-        evm_state_replayer::pipeline::run_pipeline(&db, &pipeline_mode, blocks, |progress| {
-            if progress.blocks_processed == 1 || last_log.elapsed() >= log_interval {
-                let bps = progress.blocks_per_sec();
-                let (pct, eta) = if let Some(target) = target_block {
-                    let total = target.saturating_sub(start_block);
-                    let done = progress.block_number.saturating_sub(start_block);
-                    let pct = if total > 0 {
-                        format!("{:.1}%", done as f64 / total as f64 * 100.0)
+        let log_interval = std::time::Duration::from_secs(5);
+        let mut last_log = std::time::Instant::now();
+
+        let stats =
+            evm_state_replayer::pipeline::run_pipeline(&db, &pipeline_mode, blocks, |progress| {
+                if last_log.elapsed() >= log_interval {
+                    last_log = std::time::Instant::now();
+                    let bps = progress.blocks_per_sec();
+                    let eta = if let Some(target) = target_block {
+                        if bps > 0.0 && progress.block_number < target {
+                            let remaining = target - progress.block_number;
+                            fmt_eta(std::time::Duration::from_secs_f64(remaining as f64 / bps))
+                        } else {
+                            "-".into()
+                        }
                     } else {
-                        "100%".into()
+                        "-".into()
                     };
-                    let eta = if bps > 0.0 && progress.block_number < target {
+                    let pct = target_block.map(|t| {
+                        let total = t.saturating_sub(start_block);
+                        if total > 0 {
+                            ((progress.block_number.saturating_sub(start_block)) as f64
+                                / total as f64
+                                * 100.0) as u64
+                        } else {
+                            0
+                        }
+                    });
+                    info!(
+                        block = %format!("{}/{}", fmt_num(progress.block_number), target_label),
+                        bps = %fmt_num(bps as u64),
+                        eta = %eta,
+                        pct = %pct.map(|p| format!("{p}%")).unwrap_or_else(|| "-".into()),
+                        "replay progress"
+                    );
+                }
+                true
+            })
+            .await?;
+
+        info!(
+            blocks = %fmt_num(stats.blocks_processed),
+            elapsed = %fmt_eta(stats.elapsed),
+            bps = %fmt_num(stats.blocks_per_sec() as u64),
+            "replay complete"
+        );
+    } else {
+        // ── TUI mode ────────────────────────────────────────────────
+        eprintln!();
+        eprintln!("  \x1b[36m███████╗ ██████╗ ██████╗ \x1b[0m");
+        eprintln!("  \x1b[36m██╔════╝██╔═══██╗██╔══██╗\x1b[0m");
+        eprintln!("  \x1b[36m███████╗██║   ██║██║  ██║\x1b[0m");
+        eprintln!("  \x1b[36m╚════██║██║▄▄ ██║██║  ██║\x1b[0m");
+        eprintln!("  \x1b[36m███████║╚██████╔╝██████╔╝\x1b[0m");
+        eprintln!("  \x1b[36m╚══════╝ ╚══▀▀═╝ ╚═════╝\x1b[0m");
+        eprintln!();
+        eprintln!("  EVM State Replayer");
+        eprintln!();
+        eprintln!(
+            "  chain: \x1b[1m{}\x1b[0m ({})  mode: \x1b[1m{}\x1b[0m",
+            chain_spec_name, resolved.chain_id, mode_label
+        );
+        eprintln!(
+            "  from block \x1b[1m{}\x1b[0m to \x1b[1m{}\x1b[0m",
+            fmt_num(start_block),
+            target_label
+        );
+        eprintln!();
+
+        let total = target_block
+            .map(|t| t.saturating_sub(start_block))
+            .unwrap_or(0);
+
+        let pb = if total > 0 {
+            indicatif::ProgressBar::new(total)
+        } else {
+            indicatif::ProgressBar::new_spinner()
+        };
+
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(if total > 0 {
+                "  {spinner:.cyan} [{bar:40.cyan/dim}] {percent}%\n  {msg}"
+            } else {
+                "  {spinner:.cyan} {msg}"
+            })
+            .unwrap()
+            .progress_chars("██░")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "]),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(120));
+
+        let stats =
+            evm_state_replayer::pipeline::run_pipeline(&db, &pipeline_mode, blocks, |progress| {
+                let done = progress.block_number.saturating_sub(start_block);
+                pb.set_position(done);
+
+                let bps = progress.blocks_per_sec();
+                let eta = if let Some(target) = target_block {
+                    if bps > 0.0 && progress.block_number < target {
                         let remaining = target - progress.block_number;
                         fmt_eta(std::time::Duration::from_secs_f64(remaining as f64 / bps))
                     } else {
                         "-".into()
-                    };
-                    (pct, eta)
+                    }
                 } else {
-                    ("-".into(), "-".into())
+                    "-".into()
                 };
-                info!(
-                    block = %format!("{}/{}", fmt_num(progress.block_number), target_block.map(|t| fmt_num(t)).unwrap_or_else(|| "∞".into())),
-                    progress = %pct,
-                    eta = %eta,
-                    bps = format!("{:.0}", bps),
-                    "replaying"
-                );
-                last_log = std::time::Instant::now();
-            }
-            true
-        })
-        .await?;
 
-    info!(
-        blocks = %fmt_num(stats.blocks_processed),
-        first = %fmt_num(stats.first_block.unwrap_or(0)),
-        last = %fmt_num(stats.last_block.unwrap_or(0)),
-        elapsed = ?stats.elapsed,
-        bps = format!("{:.1}", stats.blocks_per_sec()),
-        "replay complete"
-    );
+                pb.set_message(format!(
+                    "Block {}/{} | {} blocks/sec | ETA {}",
+                    fmt_num(progress.block_number),
+                    target_label,
+                    fmt_num(bps as u64),
+                    eta,
+                ));
+                true
+            })
+            .await?;
+
+        pb.finish_and_clear();
+        eprintln!(
+            "  \x1b[32m✓\x1b[0m Done! \x1b[1m{}\x1b[0m blocks in \x1b[1m{}\x1b[0m (\x1b[1m{}\x1b[0m bps)",
+            fmt_num(stats.blocks_processed),
+            fmt_eta(stats.elapsed),
+            fmt_num(stats.blocks_per_sec() as u64),
+        );
+        eprintln!();
+    }
 
     Ok(())
 }
@@ -602,12 +698,14 @@ async fn main() -> Result<()> {
             dataset,
             from,
             to,
-            log_interval,
-        } => run_replay(&resolved, &config, portal, dataset, from, to, log_interval).await,
+            plain,
+        } => run_replay(&resolved, &config, portal, dataset, from, to, plain).await,
         Command::Import { file } => run_import(&resolved, &file),
         Command::Export { file } => run_export(&resolved, &file),
         Command::Genesis { file } => run_genesis(&resolved, &file),
-        Command::Validate { rpc_url, samples } => run_validate(&resolved, &config, rpc_url, samples),
+        Command::Validate { rpc_url, samples } => {
+            run_validate(&resolved, &config, rpc_url, samples)
+        }
     }
 }
 
@@ -667,13 +765,13 @@ mod tests {
                 dataset,
                 from,
                 to,
-                log_interval,
+                plain,
             } => {
                 assert!(portal.is_none());
                 assert!(dataset.is_none());
                 assert!(from.is_none());
                 assert!(to.is_none());
-                assert_eq!(log_interval, 10);
+                assert!(!plain);
             }
             _ => panic!("expected Replay"),
         }
@@ -770,15 +868,21 @@ mod tests {
         let genesis: GenesisFile = serde_json::from_str(json).unwrap();
         assert_eq!(genesis.alloc.len(), 2);
 
-        let matic = genesis.alloc.iter()
+        let matic = genesis
+            .alloc
+            .iter()
             .find(|(a, _)| a.to_string().contains("1010"))
-            .unwrap().1;
+            .unwrap()
+            .1;
         assert!(matic.balance.unwrap() > U256::ZERO);
         assert_eq!(matic.code.as_ref().unwrap(), &[0x60, 0x80]);
 
-        let funded = genesis.alloc.iter()
+        let funded = genesis
+            .alloc
+            .iter()
             .find(|(a, _)| a.to_string().to_lowercase().contains("5973"))
-            .unwrap().1;
+            .unwrap()
+            .1;
         assert!(funded.balance.unwrap() > U256::ZERO);
         assert!(funded.code.is_none());
     }
@@ -866,7 +970,10 @@ mod tests {
         assert_eq!(config.listen.as_deref(), Some("127.0.0.1:9000"));
         assert_eq!(config.portal.as_deref(), Some("https://custom.sqd.dev"));
         assert_eq!(config.dataset.as_deref(), Some("ethereum-mainnet"));
-        assert_eq!(config.rpc_url.as_deref(), Some("https://eth-rpc.example.com"));
+        assert_eq!(
+            config.rpc_url.as_deref(),
+            Some("https://eth-rpc.example.com")
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ pub mod pipeline;
 use std::error::Error as _;
 
 use alloy_primitives::{Address, B256};
-use evm_state_chain_spec::{block_env_from_header, tx_env_from_transaction, ChainSpec};
+use evm_state_chain_spec::{ChainSpec, block_env_from_header, tx_env_from_transaction};
 use evm_state_common::AccountInfo;
 use evm_state_db::StateDb;
 use revm::database::{AccountState, CacheDB};
@@ -50,10 +50,7 @@ pub struct TxResult {
 /// Executes transactions in order using revm with a [`CacheDB`] overlay,
 /// then flushes all accumulated state changes to the [`StateDb`] atomically.
 pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Result<BlockResult> {
-    let spec_id = chain_spec.spec_at(
-        block.header.number,
-        block.header.timestamp.unwrap_or(0),
-    );
+    let spec_id = chain_spec.spec_at(block.header.number, block.header.timestamp.unwrap_or(0));
     let block_env = block_env_from_header(&block.header);
 
     let mut cache_db = CacheDB::new(db);
@@ -80,11 +77,7 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
                 .flatten()
                 .map(|a| a.nonce)
                 .unwrap_or(0);
-            let cache_nonce = cache_db
-                .cache
-                .accounts
-                .get(&caller)
-                .map(|a| a.info.nonce);
+            let cache_nonce = cache_db.cache.accounts.get(&caller).map(|a| a.info.nonce);
             trace!(
                 block = block.header.number,
                 tx_index = idx,
@@ -123,7 +116,10 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
             .map_err(|e| {
                 // Extract the inner error message, stripping EVMError's
                 // outer "transaction validation error: " / "header validation error: " wrapper.
-                let reason = e.source().map(|s| s.to_string()).unwrap_or_else(|| e.to_string());
+                let reason = e
+                    .source()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| e.to_string());
                 let from = tx.from.map(|a| format!("{a}")).unwrap_or_default();
                 let to = tx.to.map(|a| format!("{a}")).unwrap_or("(create)".into());
                 let hash = tx.hash.map(|h| format!("{h}")).unwrap_or_default();
@@ -186,7 +182,10 @@ pub fn apply_state_diffs(db: &StateDb, block: &Block) -> Result<()> {
 
         for (address, diffs) in &by_address {
             // Check for account deletion.
-            let deleted = diffs.iter().any(|d| d.kind.as_deref() == Some("-") && matches!(d.key.as_deref(), Some("balance" | "nonce" | "code")));
+            let deleted = diffs.iter().any(|d| {
+                d.kind.as_deref() == Some("-")
+                    && matches!(d.key.as_deref(), Some("balance" | "nonce" | "code"))
+            });
             if deleted {
                 batch.delete_account(address)?;
                 continue;
@@ -254,11 +253,7 @@ pub fn apply_state_diffs(db: &StateDb, block: &Block) -> Result<()> {
 }
 
 /// Write CacheDB contents to StateDb via a single WriteBatch.
-fn flush_cache_to_db(
-    db: &StateDb,
-    cache_db: &CacheDB<&StateDb>,
-    block_number: u64,
-) -> Result<()> {
+fn flush_cache_to_db(db: &StateDb, cache_db: &CacheDB<&StateDb>, block_number: u64) -> Result<()> {
     let batch = db.write_batch()?;
 
     for (address, cached_account) in &cache_db.cache.accounts {
@@ -311,7 +306,7 @@ pub(crate) mod test_helpers;
 mod tests {
     use super::*;
     use crate::test_helpers::*;
-    use alloy_primitives::{address, keccak256, Bytes, U256};
+    use alloy_primitives::{Bytes, U256, address, keccak256};
 
     // ── Empty block ──────────────────────────────────────────────────
 
@@ -343,13 +338,23 @@ mod tests {
 
         db.set_account(
             &contract,
-            &AccountInfo { nonce: 0, balance: U256::ZERO, code_hash: code_hash.into() },
-        ).unwrap();
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::ZERO,
+                code_hash: code_hash.into(),
+            },
+        )
+        .unwrap();
         db.set_code(&code_hash.into(), &bytecode).unwrap();
         db.set_account(
             &caller,
-            &AccountInfo { nonce: 0, balance: U256::from(1_000_000_000u64), code_hash: B256::ZERO },
-        ).unwrap();
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::from(1_000_000_000u64),
+                code_hash: B256::ZERO,
+            },
+        )
+        .unwrap();
 
         let tx = simple_tx(0, caller, Some(contract), Bytes::new());
         let block = simple_block(100, vec![tx]);
@@ -380,19 +385,35 @@ mod tests {
         //   PUSH1 0x00  SLOAD  PUSH1 0x01  ADD  PUSH1 0x00  SSTORE  STOP
         let inc_bytecode = vec![
             0x60, 0x00, // PUSH1 0x00
-            0x54,       // SLOAD
+            0x54, // SLOAD
             0x60, 0x01, // PUSH1 0x01
-            0x01,       // ADD
+            0x01, // ADD
             0x60, 0x00, // PUSH1 0x00
-            0x55,       // SSTORE
-            0x00,       // STOP
+            0x55, // SSTORE
+            0x00, // STOP
         ];
         let inc_hash = keccak256(&inc_bytecode);
         let inc_addr = address!("0000000000000000000000000000000000001111");
 
-        db.set_account(&inc_addr, &AccountInfo { nonce: 0, balance: U256::ZERO, code_hash: inc_hash.into() }).unwrap();
+        db.set_account(
+            &inc_addr,
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::ZERO,
+                code_hash: inc_hash.into(),
+            },
+        )
+        .unwrap();
         db.set_code(&inc_hash.into(), &inc_bytecode).unwrap();
-        db.set_account(&caller, &AccountInfo { nonce: 0, balance: U256::from(1_000_000_000u64), code_hash: B256::ZERO }).unwrap();
+        db.set_account(
+            &caller,
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::from(1_000_000_000u64),
+                code_hash: B256::ZERO,
+            },
+        )
+        .unwrap();
 
         // Two txs calling the same increment contract
         let tx0 = simple_tx(0, caller, Some(inc_addr), Bytes::new());
@@ -426,8 +447,13 @@ mod tests {
         let caller = address!("0000000000000000000000000000000000000001");
         db.set_account(
             &caller,
-            &AccountInfo { nonce: 0, balance: U256::from(1_000_000_000u64), code_hash: B256::ZERO },
-        ).unwrap();
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::from(1_000_000_000u64),
+                code_hash: B256::ZERO,
+            },
+        )
+        .unwrap();
 
         // Init code: returns runtime code [0x60, 0x42] (PUSH1 0x42)
         //   PUSH1 0x02   (60 02) — runtime code size
@@ -439,8 +465,7 @@ mod tests {
         //   RETURN       (F3)
         //   [runtime code: 60 42]
         let init_code = vec![
-            0x60, 0x02, 0x60, 0x0C, 0x60, 0x00, 0x39,
-            0x60, 0x02, 0x60, 0x00, 0xF3,
+            0x60, 0x02, 0x60, 0x0C, 0x60, 0x00, 0x39, 0x60, 0x02, 0x60, 0x00, 0xF3,
             // runtime code:
             0x60, 0x42,
         ];
@@ -472,9 +497,25 @@ mod tests {
         let contract = address!("00000000000000000000000000000000DEADBEEF");
         let caller = address!("0000000000000000000000000000000000000001");
 
-        db.set_account(&contract, &AccountInfo { nonce: 0, balance: U256::ZERO, code_hash: code_hash.into() }).unwrap();
+        db.set_account(
+            &contract,
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::ZERO,
+                code_hash: code_hash.into(),
+            },
+        )
+        .unwrap();
         db.set_code(&code_hash.into(), &bytecode).unwrap();
-        db.set_account(&caller, &AccountInfo { nonce: 0, balance: U256::from(1_000_000_000u64), code_hash: B256::ZERO }).unwrap();
+        db.set_account(
+            &caller,
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::from(1_000_000_000u64),
+                code_hash: B256::ZERO,
+            },
+        )
+        .unwrap();
 
         let tx = simple_tx(0, caller, Some(contract), Bytes::new());
         let block = simple_block(400, vec![tx]);
@@ -499,7 +540,15 @@ mod tests {
         let sender = address!("0000000000000000000000000000000000000001");
         let receiver = address!("0000000000000000000000000000000000000002");
 
-        db.set_account(&sender, &AccountInfo { nonce: 0, balance: U256::from(1_000_000_000u64), code_hash: B256::ZERO }).unwrap();
+        db.set_account(
+            &sender,
+            &AccountInfo {
+                nonce: 0,
+                balance: U256::from(1_000_000_000u64),
+                code_hash: B256::ZERO,
+            },
+        )
+        .unwrap();
 
         let mut tx = simple_tx(0, sender, Some(receiver), Bytes::new());
         tx.value = Some(U256::from(500_000u64));

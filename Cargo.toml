@@ -39,6 +39,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+indicatif = "0.17"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

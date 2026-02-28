@@ -20,6 +20,7 @@ evm-state-validation = { workspace = true }
 alloy-primitives = { workspace = true }
 axum = { workspace = true }
 hex = "0.4"
+indicatif = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
