@@ -128,6 +128,7 @@ Steps are grouped by **dependency tier** — everything within the same tier can
 ### Step 17: Client — Prefetch + Local Execution Flow
 **Crate**: `crates/client` (extend)
 **Scope**: Higher-level client API: `call(to, calldata) -> Result<Bytes>`. Internally calls the prefetch endpoint, receives the state slice, populates the local cache, then re-executes locally with revm for verification (optional). Returns the result. Configurable trust mode: `TrustServer` (use prefetch result directly) or `Verify` (re-execute locally).
+**Docs**: Update `README.md` with usage examples for both modes, explain the verification process and when it might be useful. Add SVG schemas to illustrate the flow of data between client, server, and local execution.
 **Tests**: End-to-end test against a running API server (or mock): call a view function, verify result, verify local re-execution matches server result. Test `TrustServer` mode skips local execution. Test cache is populated after prefetch.
 **Depends on**: Step 9, Step 11
 

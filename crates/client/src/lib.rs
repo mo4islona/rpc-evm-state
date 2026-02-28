@@ -26,6 +26,9 @@ pub enum Error {
 
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+
+    #[error("EVM execution error: {0}")]
+    Evm(String),
 }
 
 impl DBErrorMarker for Error {}
@@ -356,6 +359,135 @@ impl DatabaseRef for RemoteDB {
     }
 }
 
+// ── StateClient — higher-level call API ───────────────────────────
+
+/// Trust mode for the [`StateClient`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustMode {
+    /// Use the server's execution result directly without local verification.
+    TrustServer,
+    /// Re-execute locally with revm and verify the result matches the server.
+    Verify,
+}
+
+/// Result of a [`StateClient::call`] invocation.
+pub struct CallResult {
+    /// Raw output bytes from the EVM execution.
+    pub output: Bytes,
+    /// Whether the EVM call succeeded.
+    pub success: bool,
+    /// `Some(true)` if local re-execution matched the server result,
+    /// `Some(false)` if it diverged, `None` in `TrustServer` mode.
+    pub verified: Option<bool>,
+}
+
+/// Higher-level client that combines [`RemoteDB`] prefetch with optional
+/// local revm re-execution for trustless verification.
+pub struct StateClient {
+    db: RemoteDB,
+    spec_id: revm::primitives::hardfork::SpecId,
+    trust_mode: TrustMode,
+}
+
+impl StateClient {
+    /// Create a new `StateClient`.
+    pub fn new(
+        base_url: &str,
+        spec_id: revm::primitives::hardfork::SpecId,
+        trust_mode: TrustMode,
+    ) -> Self {
+        Self {
+            db: RemoteDB::new(base_url),
+            spec_id,
+            trust_mode,
+        }
+    }
+
+    /// Access the underlying `RemoteDB`.
+    pub fn remote_db(&self) -> &RemoteDB {
+        &self.db
+    }
+
+    /// Execute an EVM call via the server's prefetch endpoint.
+    ///
+    /// In `TrustServer` mode, the server result is returned directly.
+    /// In `Verify` mode, the call is re-executed locally with revm using
+    /// the state cached from the prefetch response, and the results are compared.
+    pub fn call(
+        &self,
+        to: Address,
+        calldata: &[u8],
+        from: Option<Address>,
+        value: Option<U256>,
+    ) -> Result<CallResult, Error> {
+        let prefetch = self.db.prefetch(to, calldata, from, value)?;
+
+        match self.trust_mode {
+            TrustMode::TrustServer => Ok(CallResult {
+                output: prefetch.result,
+                success: prefetch.success,
+                verified: None,
+            }),
+            TrustMode::Verify => {
+                let local = self.execute_locally(to, calldata, from, value)?;
+                let matches =
+                    local.result == prefetch.result && local.success == prefetch.success;
+                Ok(CallResult {
+                    output: local.result,
+                    success: local.success,
+                    verified: Some(matches),
+                })
+            }
+        }
+    }
+
+    fn execute_locally(
+        &self,
+        to: Address,
+        calldata: &[u8],
+        from: Option<Address>,
+        value: Option<U256>,
+    ) -> Result<PrefetchResult, Error> {
+        use revm::database_interface::WrapDatabaseRef;
+        use revm::{Context, ExecuteEvm, MainBuilder};
+
+        let mut wrapped = WrapDatabaseRef(&self.db);
+        let ctx: revm::handler::MainnetContext<&mut WrapDatabaseRef<&RemoteDB>> =
+            Context::new(&mut wrapped, self.spec_id);
+        let mut evm = ctx.build_mainnet();
+
+        let tx_env = revm::context::TxEnv {
+            caller: from.unwrap_or_default(),
+            kind: revm::primitives::TxKind::Call(to),
+            data: Bytes::copy_from_slice(calldata),
+            value: value.unwrap_or_default(),
+            gas_limit: 30_000_000,
+            gas_price: 0,
+            ..Default::default()
+        };
+
+        let result = evm
+            .transact(tx_env)
+            .map_err(|e| Error::Evm(format!("{e:?}")))?;
+
+        use revm::context_interface::result::{ExecutionResult, Output};
+
+        let output = match &result.result {
+            ExecutionResult::Success { output, .. } => match output {
+                Output::Call(bytes) => bytes.clone(),
+                Output::Create(bytes, _) => bytes.clone(),
+            },
+            ExecutionResult::Revert { output, .. } => output.clone(),
+            ExecutionResult::Halt { .. } => Bytes::new(),
+        };
+
+        Ok(PrefetchResult {
+            result: output,
+            success: result.result.is_success(),
+        })
+    }
+}
+
 // ── Hex parsing helpers ────────────────────────────────────────────
 
 fn parse_u256_hex(s: &str) -> Result<U256, Error> {
@@ -602,5 +734,140 @@ mod tests {
     async fn block_hash_returns_zero() {
         let remote = RemoteDB::new("http://unused:9999");
         assert_eq!(remote.block_hash_ref(12345).unwrap(), B256::ZERO);
+    }
+
+    /// Helper: set up a contract that reads slot 0 and returns it.
+    fn deploy_return_slot0(state: &Arc<AppState>) -> Address {
+        // SLOAD(0) → MSTORE(0) → RETURN(0, 32)
+        let bytecode = vec![
+            0x60, 0x00, // PUSH1 0x00
+            0x54, // SLOAD
+            0x60, 0x00, // PUSH1 0x00
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 0x20
+            0x60, 0x00, // PUSH1 0x00
+            0xF3, // RETURN
+        ];
+        let code_hash = alloy_primitives::keccak256(&bytecode);
+        let contract = "0x0000000000000000000000000000000000C0FFEE"
+            .parse::<Address>()
+            .unwrap();
+
+        state
+            .db
+            .set_account(
+                &contract,
+                &CommonAccountInfo {
+                    nonce: 0,
+                    balance: U256::ZERO,
+                    code_hash: code_hash.into(),
+                },
+            )
+            .unwrap();
+        state.db.set_code(&code_hash.into(), &bytecode).unwrap();
+        state
+            .db
+            .set_storage(&contract, &B256::ZERO, &U256::from(0xCAFEu64))
+            .unwrap();
+        state.db.set_head_block(100).unwrap();
+        contract
+    }
+
+    /// Helper: set up a contract that always reverts.
+    fn deploy_reverting(state: &Arc<AppState>) -> Address {
+        // PUSH1 0x00, PUSH1 0x00, REVERT
+        let bytecode = vec![
+            0x60, 0x00, // PUSH1 0x00
+            0x60, 0x00, // PUSH1 0x00
+            0xFD, // REVERT
+        ];
+        let code_hash = alloy_primitives::keccak256(&bytecode);
+        let contract = "0x0000000000000000000000000000000000BEEF01"
+            .parse::<Address>()
+            .unwrap();
+
+        state
+            .db
+            .set_account(
+                &contract,
+                &CommonAccountInfo {
+                    nonce: 0,
+                    balance: U256::ZERO,
+                    code_hash: code_hash.into(),
+                },
+            )
+            .unwrap();
+        state.db.set_code(&code_hash.into(), &bytecode).unwrap();
+        state.db.set_head_block(100).unwrap();
+        contract
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_trust_server_returns_result() {
+        let (_dir, state) = test_state();
+        let contract = deploy_return_slot0(&state);
+
+        let base_url = start_server(state).await;
+        let client = StateClient::new(&base_url, SpecId::SHANGHAI, TrustMode::TrustServer);
+
+        let result = client.call(contract, &[], None, None).unwrap();
+        assert!(result.success);
+        assert!(result.verified.is_none());
+        // Should return 32 bytes with 0xCAFE
+        assert_eq!(result.output.len(), 32);
+        let val = U256::from_be_slice(&result.output);
+        assert_eq!(val, U256::from(0xCAFEu64));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_verify_mode_matches() {
+        let (_dir, state) = test_state();
+        let contract = deploy_return_slot0(&state);
+
+        let base_url = start_server(state).await;
+        let client = StateClient::new(&base_url, SpecId::SHANGHAI, TrustMode::Verify);
+
+        let result = client.call(contract, &[], None, None).unwrap();
+        assert!(result.success);
+        assert_eq!(result.verified, Some(true));
+        let val = U256::from_be_slice(&result.output);
+        assert_eq!(val, U256::from(0xCAFEu64));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_verify_mode_populates_cache() {
+        let (_dir, state) = test_state();
+        let contract = deploy_return_slot0(&state);
+
+        let base_url = start_server(state).await;
+        let client = StateClient::new(&base_url, SpecId::SHANGHAI, TrustMode::Verify);
+
+        let _ = client.call(contract, &[], None, None).unwrap();
+
+        // After call(), the cache should contain the contract account + storage
+        let info = client
+            .remote_db()
+            .basic_ref(contract)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.code_hash, B256::from(alloy_primitives::keccak256(&[
+            0x60, 0x00, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xF3,
+        ])));
+
+        let storage = client.remote_db().storage_ref(contract, U256::ZERO).unwrap();
+        assert_eq!(storage, U256::from(0xCAFEu64));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_trust_server_reverted_tx() {
+        let (_dir, state) = test_state();
+        let contract = deploy_reverting(&state);
+
+        let base_url = start_server(state).await;
+        let client = StateClient::new(&base_url, SpecId::SHANGHAI, TrustMode::TrustServer);
+
+        let result = client.call(contract, &[], None, None).unwrap();
+        assert!(!result.success);
+        assert!(result.verified.is_none());
     }
 }

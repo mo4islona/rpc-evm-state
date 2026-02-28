@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
 lru = { workspace = true }
+evm-state-chain-spec = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
