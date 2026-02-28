@@ -60,6 +60,7 @@ fn build_query(from: u64, to: Option<u64>) -> serde_json::Value {
                 "size": true
             },
             "transaction": {
+                "transactionIndex": true,
                 "hash": true,
                 "from": true,
                 "to": true,
