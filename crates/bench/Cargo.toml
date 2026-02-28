@@ -1,0 +1,29 @@
+[package]
+name = "evm-state-bench"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+evm-state-db = { workspace = true }
+evm-state-api = { workspace = true }
+evm-state-client = { workspace = true }
+evm-state-common = { workspace = true }
+evm-state-chain-spec = { workspace = true }
+alloy-primitives = { workspace = true }
+revm = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "state_service"
+harness = false
+
+[[bin]]
+name = "report"
+path = "src/bin/report.rs"
