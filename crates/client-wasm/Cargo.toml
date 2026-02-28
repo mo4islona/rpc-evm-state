@@ -1,0 +1,34 @@
+[package]
+name = "evm-state-client-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM-compiled EVM state client with JS bindings"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# EVM — pure-Rust crypto for WASM (no C/asm)
+alloy-primitives = { version = "1", default-features = false, features = ["std", "serde", "tiny-keccak"] }
+# k256 (pure Rust) is used for ecrecover when secp256k1 feature is disabled
+revm = { version = "24", default-features = false, features = ["std", "kzg-rs", "portable"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# WASM bindings
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true }
+js-sys = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+# getrandom v0.2 needs "js" feature for WASM (pulled transitively by crypto deps)
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# getrandom v0.3 needs "wasm_js" feature for WASM
+getrandom = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
