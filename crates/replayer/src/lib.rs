@@ -1,6 +1,7 @@
 pub mod pipeline;
 
 use std::error::Error as _;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, B256};
 use evm_state_chain_spec::{ChainSpec, block_env_from_header, tx_env_from_transaction};
@@ -36,6 +37,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct BlockResult {
     pub block_number: u64,
     pub tx_results: Vec<TxResult>,
+    /// Time spent executing EVM transactions.
+    pub execution_time: Duration,
+    /// Time spent writing state changes to disk.
+    pub write_time: Duration,
 }
 
 /// Result of executing a single transaction within a block.
@@ -60,6 +65,7 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     // not EVM-executed — their state changes come from the portal's diffs.
     let has_state_diffs = !block.state_diffs.is_empty();
 
+    let exec_start = Instant::now();
     for (idx, tx) in block.transactions.iter().enumerate() {
         let is_system = is_system_tx(tx);
 
@@ -155,6 +161,9 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
         cache_db.commit(result_and_state.state);
     }
 
+    let execution_time = exec_start.elapsed();
+
+    let write_start = Instant::now();
     if has_state_diffs {
         // Hybrid mode: flush EVM-replayed state WITHOUT setting head_block,
         // then apply system tx state diffs in a second commit that sets
@@ -166,10 +175,13 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
         // Normal mode: single atomic commit.
         flush_cache_to_db(db, &cache_db, Some(block.header.number))?;
     }
+    let write_time = write_start.elapsed();
 
     Ok(BlockResult {
         block_number: block.header.number,
         tx_results,
+        execution_time,
+        write_time,
     })
 }
 

@@ -19,5 +19,6 @@ evm-state-db = { workspace = true }
 evm-state-common = { workspace = true }
 evm-state-chain-spec = { workspace = true }
 evm-state-api = { workspace = true }
+evm-state-metrics = { workspace = true }
 axum = { workspace = true }
 tempfile = "3"

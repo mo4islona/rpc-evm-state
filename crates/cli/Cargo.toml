@@ -16,6 +16,7 @@ evm-state-sqd-fetcher = { workspace = true }
 evm-state-snapshot = { workspace = true }
 evm-state-common = { workspace = true }
 evm-state-validation = { workspace = true }
+evm-state-metrics = { workspace = true }
 
 alloy-primitives = { workspace = true }
 axum = { workspace = true }

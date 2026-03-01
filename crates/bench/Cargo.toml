@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 evm-state-db = { workspace = true }
 evm-state-api = { workspace = true }
+evm-state-metrics = { workspace = true }
 evm-state-client = { workspace = true }
 evm-state-common = { workspace = true }
 evm-state-chain-spec = { workspace = true }

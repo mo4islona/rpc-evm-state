@@ -169,6 +169,10 @@ enum Command {
         /// Use plain text logging instead of the TUI progress bar.
         #[arg(long)]
         plain: bool,
+
+        /// Address for Prometheus metrics HTTP endpoint (e.g. 0.0.0.0:9090).
+        #[arg(long, env = "EVM_STATE_METRICS_LISTEN")]
+        metrics_listen: Option<String>,
     },
 
     /// Import a JSON Lines snapshot into the state database.
@@ -287,6 +291,18 @@ fn fmt_speed(bytes: u64, elapsed: std::time::Duration) -> String {
     }
 }
 
+/// Format pipeline stage timing as "fetch/exec/write" percentages.
+fn fmt_stages(progress: &evm_state_replayer::pipeline::BlockProgress) -> String {
+    let total = progress.elapsed.as_secs_f64();
+    if total <= 0.0 {
+        return "- / - / -".into();
+    }
+    let f = (progress.fetch_time.as_secs_f64() / total * 100.0) as u64;
+    let e = (progress.execution_time.as_secs_f64() / total * 100.0) as u64;
+    let w = (progress.write_time.as_secs_f64() / total * 100.0) as u64;
+    format!("fetch {f}% / exec {e}% / write {w}%")
+}
+
 fn dataset_for_chain(chain_id: u64) -> Result<&'static str> {
     match chain_id {
         1 => Ok(evm_state_sqd_fetcher::ETHEREUM_DATASET),
@@ -305,8 +321,12 @@ async fn run_serve(resolved: &Resolved, config: &Config, listen: Option<String>)
     let chain_spec = evm_state_chain_spec::from_chain_id(resolved.chain_id)
         .with_context(|| format!("unsupported chain ID: {}", resolved.chain_id))?;
 
-    let db = evm_state_db::StateDb::open(&resolved.db_path)
+    let db = evm_state_metrics::InstrumentedStateDb::open(&resolved.db_path)
         .with_context(|| format!("failed to open database at {}", resolved.db_path))?;
+
+    if let Ok(Some(head)) = db.get_head_block() {
+        evm_state_metrics::HEAD_BLOCK.set(head as i64);
+    }
 
     let state = Arc::new(evm_state_api::AppState { db, chain_spec });
     let router = evm_state_api::build_router(state);
@@ -328,6 +348,7 @@ async fn run_replay(
     from: Option<u64>,
     to: Option<u64>,
     plain: bool,
+    metrics_listen: Option<String>,
 ) -> Result<()> {
     let portal_url = portal
         .or_else(|| config.portal.clone())
@@ -368,6 +389,26 @@ async fn run_replay(
 
     let pipeline_mode = evm_state_replayer::pipeline::PipelineMode::Replay(chain_spec);
 
+    // Spawn standalone metrics server if --metrics-listen is set.
+    if let Some(ref addr) = metrics_listen {
+        let router = evm_state_metrics::metrics_router();
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("failed to bind metrics server to {addr}"))?;
+        info!(listen = %addr, "starting metrics server");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, router).await {
+                error!(error = %e, "metrics server failed");
+            }
+        });
+    }
+
+    // Track previous cumulative times so we can compute per-block deltas.
+    let mut prev_fetch = std::time::Duration::ZERO;
+    let mut prev_exec = std::time::Duration::ZERO;
+    let mut prev_write = std::time::Duration::ZERO;
+    let mut prev_bytes: u64 = 0;
+
     if plain {
         // ── Plain text logging ──────────────────────────────────────
         info!(
@@ -384,6 +425,26 @@ async fn run_replay(
 
         let stats =
             evm_state_replayer::pipeline::run_pipeline(&db, &pipeline_mode, blocks, |progress| {
+                // Record per-block replayer metrics.
+                evm_state_metrics::REPLAYER_BLOCKS_TOTAL.inc();
+                evm_state_metrics::HEAD_BLOCK.set(progress.block_number as i64);
+
+                let delta_fetch = progress.fetch_time.saturating_sub(prev_fetch);
+                let delta_exec = progress.execution_time.saturating_sub(prev_exec);
+                let delta_write = progress.write_time.saturating_sub(prev_write);
+                prev_fetch = progress.fetch_time;
+                prev_exec = progress.execution_time;
+                prev_write = progress.write_time;
+
+                evm_state_metrics::REPLAYER_FETCH_DURATION.observe(delta_fetch.as_secs_f64());
+                evm_state_metrics::REPLAYER_EXEC_DURATION.observe(delta_exec.as_secs_f64());
+                evm_state_metrics::REPLAYER_WRITE_DURATION.observe(delta_write.as_secs_f64());
+
+                let current_bytes = fetcher.bytes_downloaded();
+                let delta_bytes = current_bytes.saturating_sub(prev_bytes);
+                prev_bytes = current_bytes;
+                evm_state_metrics::REPLAYER_BYTES_DOWNLOADED.inc_by(delta_bytes);
+
                 if last_log.elapsed() >= log_interval {
                     last_log = std::time::Instant::now();
                     let bps = progress.blocks_per_sec();
@@ -408,12 +469,14 @@ async fn run_replay(
                         }
                     });
                     let dl = fmt_speed(fetcher.bytes_downloaded(), progress.elapsed);
+                    let stages = fmt_stages(progress);
                     info!(
                         block = %format!("{}/{}", fmt_num(progress.block_number), target_label),
                         bps = %fmt_num(bps as u64),
                         dl = %dl,
                         eta = %eta,
                         pct = %pct.map(|p| format!("{p}%")).unwrap_or_else(|| "-".into()),
+                        stages = %stages,
                         "replay progress"
                     );
                 }
@@ -475,6 +538,26 @@ async fn run_replay(
 
         let stats =
             evm_state_replayer::pipeline::run_pipeline(&db, &pipeline_mode, blocks, |progress| {
+                // Record per-block replayer metrics.
+                evm_state_metrics::REPLAYER_BLOCKS_TOTAL.inc();
+                evm_state_metrics::HEAD_BLOCK.set(progress.block_number as i64);
+
+                let delta_fetch = progress.fetch_time.saturating_sub(prev_fetch);
+                let delta_exec = progress.execution_time.saturating_sub(prev_exec);
+                let delta_write = progress.write_time.saturating_sub(prev_write);
+                prev_fetch = progress.fetch_time;
+                prev_exec = progress.execution_time;
+                prev_write = progress.write_time;
+
+                evm_state_metrics::REPLAYER_FETCH_DURATION.observe(delta_fetch.as_secs_f64());
+                evm_state_metrics::REPLAYER_EXEC_DURATION.observe(delta_exec.as_secs_f64());
+                evm_state_metrics::REPLAYER_WRITE_DURATION.observe(delta_write.as_secs_f64());
+
+                let current_bytes = fetcher.bytes_downloaded();
+                let delta_bytes = current_bytes.saturating_sub(prev_bytes);
+                prev_bytes = current_bytes;
+                evm_state_metrics::REPLAYER_BYTES_DOWNLOADED.inc_by(delta_bytes);
+
                 let done = progress.block_number.saturating_sub(start_block);
                 pb.set_position(done);
 
@@ -491,13 +574,15 @@ async fn run_replay(
                 };
 
                 let dl = fmt_speed(fetcher.bytes_downloaded(), progress.elapsed);
+                let stages = fmt_stages(progress);
                 pb.set_message(format!(
-                    "Block {}/{} | {} blocks/sec | {} | ETA {}",
+                    "Block {}/{} | {} blocks/sec | {} | ETA {} | {}",
                     fmt_num(progress.block_number),
                     target_label,
                     fmt_num(bps as u64),
                     dl,
                     eta,
+                    stages,
                 ));
                 true
             })
@@ -723,7 +808,8 @@ async fn main() -> Result<()> {
             from,
             to,
             plain,
-        } => run_replay(&resolved, &config, portal, dataset, from, to, plain).await,
+            metrics_listen,
+        } => run_replay(&resolved, &config, portal, dataset, from, to, plain, metrics_listen).await,
         Command::Import { file } => run_import(&resolved, &file),
         Command::Export { file } => run_export(&resolved, &file),
         Command::Genesis { file } => run_genesis(&resolved, &file),
@@ -790,12 +876,14 @@ mod tests {
                 from,
                 to,
                 plain,
+                metrics_listen,
             } => {
                 assert!(portal.is_none());
                 assert!(dataset.is_none());
                 assert!(from.is_none());
                 assert!(to.is_none());
                 assert!(!plain);
+                assert!(metrics_listen.is_none());
             }
             _ => panic!("expected Replay"),
         }

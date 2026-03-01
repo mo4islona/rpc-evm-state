@@ -513,6 +513,7 @@ mod tests {
     use evm_state_chain_spec::{ChainSpec, HardforkActivation, HardforkCondition};
     use evm_state_common::AccountInfo as CommonAccountInfo;
     use evm_state_db::StateDb;
+    use evm_state_metrics::InstrumentedStateDb;
     use revm::database_interface::DatabaseRef;
     use revm::primitives::hardfork::SpecId;
     use std::sync::Arc;
@@ -532,7 +533,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path()).unwrap();
         let state = Arc::new(AppState {
-            db,
+            db: InstrumentedStateDb::new(db),
             chain_spec: ChainSpec {
                 chain_id: 1,
                 name: "test",

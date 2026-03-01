@@ -44,6 +44,9 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Metrics
+prometheus = "0.14"
+
 # Compression
 zstd = "0.13"
 
@@ -63,6 +66,7 @@ evm-state-sqd-fetcher = { path = "crates/sqd-fetcher" }
 evm-state-snapshot = { path = "crates/snapshot" }
 evm-state-validation = { path = "crates/validation" }
 evm-state-client-wasm = { path = "crates/client-wasm" }
+evm-state-metrics = { path = "crates/metrics" }
 evm-state-bench = { path = "crates/bench" }
 evm-state-cli = { path = "crates/cli" }
 

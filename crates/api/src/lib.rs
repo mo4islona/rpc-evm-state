@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use evm_state_chain_spec::ChainSpec;
-use evm_state_db::StateDb;
+use evm_state_metrics::InstrumentedStateDb;
 use revm::context::TxEnv;
 use revm::database_interface::WrapDatabaseRef;
 use revm::primitives::TxKind;
@@ -24,7 +24,7 @@ use inspector::AccessListInspector;
 
 /// Shared application state provided to all handlers.
 pub struct AppState {
-    pub db: StateDb,
+    pub db: InstrumentedStateDb,
     pub chain_spec: ChainSpec,
 }
 
@@ -302,11 +302,11 @@ async fn post_prefetch(
     let head_block = state.db.get_head_block()?.unwrap_or(0);
     let spec_id = state.chain_spec.spec_at(head_block, 0);
 
-    // Use WrapDatabaseRef since we only have &StateDb (shared via Arc)
+    // Use WrapDatabaseRef since we only have &InstrumentedStateDb (shared via Arc)
     let db_ref = WrapDatabaseRef(&state.db);
     let inspector = AccessListInspector::new();
 
-    let ctx: revm::handler::MainnetContext<WrapDatabaseRef<&StateDb>> =
+    let ctx: revm::handler::MainnetContext<WrapDatabaseRef<&InstrumentedStateDb>> =
         Context::new(db_ref, spec_id);
     let ctx = ctx
         .modify_block_chained(|b: &mut revm::context::BlockEnv| {
@@ -439,19 +439,21 @@ async fn ws_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+    evm_state_metrics::WS_ACTIVE_CONNECTIONS.inc();
     while let Some(Ok(msg)) = socket.recv().await {
         match msg {
             Message::Text(text) => {
                 let response = process_ws_message(&text, &state);
                 let json = serde_json::to_string(&response).unwrap();
                 if socket.send(Message::Text(json.into())).await.is_err() {
-                    return;
+                    break;
                 }
             }
-            Message::Close(_) => return,
+            Message::Close(_) => break,
             _ => {}
         }
     }
+    evm_state_metrics::WS_ACTIVE_CONNECTIONS.dec();
 }
 
 fn process_ws_message(text: &str, state: &AppState) -> WsResponse {
@@ -578,6 +580,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/batch", post(post_batch))
         .route("/v1/prefetch", post(post_prefetch))
         .route("/v1/stream", any(ws_handler))
+        .route("/metrics", get(evm_state_metrics::metrics_handler))
+        .layer(axum::middleware::from_fn(evm_state_metrics::metrics_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -592,7 +596,7 @@ mod tests {
 
     fn tmp_state() -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(dir.path()).unwrap();
+        let db = InstrumentedStateDb::new(evm_state_db::StateDb::open(dir.path()).unwrap());
         let state = Arc::new(AppState {
             db,
             chain_spec: ChainSpec {

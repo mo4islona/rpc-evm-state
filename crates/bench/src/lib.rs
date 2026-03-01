@@ -5,6 +5,7 @@ use evm_state_api::{AppState, build_router};
 use evm_state_chain_spec::{ChainSpec, HardforkActivation, HardforkCondition};
 use evm_state_common::AccountInfo;
 use evm_state_db::StateDb;
+use evm_state_metrics::InstrumentedStateDb;
 use revm::primitives::hardfork::SpecId;
 
 // ── Test harness ────────────────────────────────────────────────────
@@ -64,7 +65,7 @@ pub fn setup_populated_db(
     batch.commit().unwrap();
 
     let state = Arc::new(AppState {
-        db,
+        db: InstrumentedStateDb::new(db),
         chain_spec: test_chain_spec(),
     });
     (dir, state)
@@ -101,7 +102,7 @@ pub fn setup_tick_scan_db(num_slots: usize) -> (tempfile::TempDir, Arc<AppState>
     batch.commit().unwrap();
 
     let state = Arc::new(AppState {
-        db,
+        db: InstrumentedStateDb::new(db),
         chain_spec: test_chain_spec(),
     });
     (dir, state, contract)

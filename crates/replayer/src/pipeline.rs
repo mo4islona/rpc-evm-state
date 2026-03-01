@@ -53,6 +53,12 @@ pub struct BlockProgress {
     pub blocks_processed: u64,
     /// Wall-clock time since the pipeline started.
     pub elapsed: std::time::Duration,
+    /// Cumulative time spent waiting for the block source (network fetch).
+    pub fetch_time: std::time::Duration,
+    /// Cumulative time spent executing EVM transactions.
+    pub execution_time: std::time::Duration,
+    /// Cumulative time spent writing state to disk.
+    pub write_time: std::time::Duration,
 }
 
 impl BlockProgress {
@@ -101,7 +107,13 @@ where
         elapsed: std::time::Duration::ZERO,
     };
 
+    let mut cumulative_fetch = std::time::Duration::ZERO;
+    let mut cumulative_exec = std::time::Duration::ZERO;
+    let mut cumulative_write = std::time::Duration::ZERO;
+
+    let mut fetch_start = Instant::now();
     while let Some(block_result) = blocks.next().await {
+        cumulative_fetch += fetch_start.elapsed();
         let block = block_result.map_err(|e| Error::Source(e.to_string()))?;
 
         // Skip blocks already processed (resume safety).
@@ -126,7 +138,9 @@ where
         let tx_count = match mode {
             PipelineMode::Replay(chain_spec) => {
                 let count = block.transactions.len();
-                replay_block(db, &block, chain_spec)?;
+                let result = replay_block(db, &block, chain_spec)?;
+                cumulative_exec += result.execution_time;
+                cumulative_write += result.write_time;
                 count
             }
         };
@@ -143,11 +157,15 @@ where
             tx_count,
             blocks_processed: stats.blocks_processed,
             elapsed: stats.elapsed,
+            fetch_time: cumulative_fetch,
+            execution_time: cumulative_exec,
+            write_time: cumulative_write,
         };
 
         if !on_progress(&progress) {
             break;
         }
+        fetch_start = Instant::now();
     }
 
     stats.elapsed = start.elapsed();
