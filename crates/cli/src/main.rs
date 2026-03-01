@@ -219,7 +219,7 @@ impl Resolved {
                 .db
                 .clone()
                 .or_else(|| config.db_path.clone())
-                .unwrap_or_else(|| "./state.mdbx".to_string()),
+                .unwrap_or_else(|| "./state.rocksdb".to_string()),
             chain_id: cli.chain_id.or(config.chain_id).unwrap_or(137),
             log_level: cli
                 .log_level
@@ -587,7 +587,7 @@ fn run_genesis(resolved: &Resolved, file: &std::path::Path) -> Result<()> {
         "importing genesis allocations"
     );
 
-    let batch = db.write_batch()?;
+    let mut batch = db.write_batch()?;
     let mut accounts = 0u64;
     let mut storage_slots = 0u64;
     let mut code_entries = 0u64;
@@ -979,7 +979,7 @@ mod tests {
     #[test]
     fn deserialize_full_config() {
         let toml_str = r#"
-            db_path = "/data/state.mdbx"
+            db_path = "/data/state.rocksdb"
             chain_id = 1
             log_level = "debug"
             listen = "127.0.0.1:9000"
@@ -988,7 +988,7 @@ mod tests {
             rpc_url = "https://eth-rpc.example.com"
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.db_path.as_deref(), Some("/data/state.mdbx"));
+        assert_eq!(config.db_path.as_deref(), Some("/data/state.rocksdb"));
         assert_eq!(config.chain_id, Some(1));
         assert_eq!(config.log_level.as_deref(), Some("debug"));
         assert_eq!(config.listen.as_deref(), Some("127.0.0.1:9000"));
@@ -1027,7 +1027,7 @@ mod tests {
         let config = Config::default();
         let resolved = Resolved::from_cli_and_config(&cli, &config);
 
-        assert_eq!(resolved.db_path, "./state.mdbx");
+        assert_eq!(resolved.db_path, "./state.rocksdb");
         assert_eq!(resolved.chain_id, 137);
         assert_eq!(resolved.log_level, "info");
     }
@@ -1036,14 +1036,14 @@ mod tests {
     fn resolved_config_file_overrides_defaults() {
         let cli = Cli::try_parse_from(["evm-state", "serve"]).unwrap();
         let config = Config {
-            db_path: Some("/data/custom.mdbx".into()),
+            db_path: Some("/data/custom.rocksdb".into()),
             chain_id: Some(1),
             log_level: Some("debug".into()),
             ..Default::default()
         };
         let resolved = Resolved::from_cli_and_config(&cli, &config);
 
-        assert_eq!(resolved.db_path, "/data/custom.mdbx");
+        assert_eq!(resolved.db_path, "/data/custom.rocksdb");
         assert_eq!(resolved.chain_id, 1);
         assert_eq!(resolved.log_level, "debug");
     }
@@ -1053,7 +1053,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "evm-state",
             "--db",
-            "/cli/path.mdbx",
+            "/cli/path.rocksdb",
             "--chain-id",
             "1",
             "--log-level",
@@ -1062,14 +1062,14 @@ mod tests {
         ])
         .unwrap();
         let config = Config {
-            db_path: Some("/config/path.mdbx".into()),
+            db_path: Some("/config/path.rocksdb".into()),
             chain_id: Some(137),
             log_level: Some("debug".into()),
             ..Default::default()
         };
         let resolved = Resolved::from_cli_and_config(&cli, &config);
 
-        assert_eq!(resolved.db_path, "/cli/path.mdbx");
+        assert_eq!(resolved.db_path, "/cli/path.rocksdb");
         assert_eq!(resolved.chain_id, 1);
         assert_eq!(resolved.log_level, "warn");
     }

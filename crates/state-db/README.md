@@ -1,10 +1,10 @@
 # evm-state-db
 
-Flat key-value state database backed by [libmdbx](https://github.com/erthink/libmdbx). Stores EVM account state, storage slots, contract bytecode, and sync metadata.
+Flat key-value state database backed by [RocksDB](https://github.com/facebook/rocksdb). Stores EVM account state, storage slots, contract bytecode, and sync metadata.
 
-## Tables
+## Column Families
 
-| Table | Key | Value |
+| Column Family | Key | Value |
 |---|---|---|
 | `accounts` | `Address` (20B) | `AccountInfo` (72B binary) |
 | `storage` | `Address \|\| Slot` (52B) | `U256` (32B big-endian) |
@@ -35,7 +35,7 @@ let head = db.get_head_block()?;
 
 ## Iteration
 
-Cursor-based enumeration of all entries in a table:
+Enumeration of all entries in a column family:
 
 ```rust
 let accounts: Vec<(Address, AccountInfo)> = db.iter_accounts()?;
@@ -46,7 +46,7 @@ Useful for validation, export, and sampling workflows.
 
 ## Batch Writes
 
-`WriteBatch` groups multiple writes into a single atomic libmdbx transaction. If not explicitly committed, the batch rolls back on drop.
+`WriteBatch` groups multiple writes into a single atomic RocksDB write batch. If not explicitly committed, the batch is discarded on drop.
 
 ```rust
 let mut batch = db.write_batch()?;
@@ -59,15 +59,15 @@ batch.commit()?;
 
 `StateDb` implements both `revm::Database` and `revm::DatabaseRef` traits, allowing it to be used directly as the backing store for EVM execution:
 
-- `basic(address)` → reads account info from the `accounts` table
-- `code_by_hash(hash)` → reads bytecode from the `code` table
-- `storage(address, index)` → reads slot values from the `storage` table
+- `basic(address)` → reads account info from the `accounts` column family
+- `code_by_hash(hash)` → reads bytecode from the `code` column family
+- `storage(address, index)` → reads slot values from the `storage` column family
 - `block_hash(number)` → returns `B256::ZERO` (block hashes not stored)
 
 This means you can pass `&mut StateDb` directly to revm's `Context::new()` and execute EVM transactions against the stored state.
 
 ## Design Choices
 
-- **No Merkle trie** — flat KV layout optimized for point reads (sub-microsecond via mmap).
-- **Big-endian encoding** — preserves lexicographic ordering for potential range scans.
-- **Generic over transaction kind** — internal helpers work with both RO and RW libmdbx transactions.
+- **No Merkle trie** — flat KV layout optimized for point reads.
+- **Big-endian encoding** — preserves lexicographic ordering for range scans and prefix iteration.
+- **Column families** — separate accounts, storage, code, and metadata with independent configuration (compression, bloom filters, compaction strategy).

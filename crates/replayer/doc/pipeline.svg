@@ -90,7 +90,7 @@
 
   <!-- ─── StateDb (bottom) ─── -->
   <rect x="265" y="443" width="310" height="45" rx="6" fill="#eef2ff" stroke="#a5b4fc" stroke-width="1.5"/>
-  <text x="420" y="464" text-anchor="middle" font-size="12" font-weight="600" fill="#3730a3">StateDb  (libmdbx)</text>
+  <text x="420" y="464" text-anchor="middle" font-size="12" font-weight="600" fill="#3730a3">StateDb  (RocksDB)</text>
   <text x="420" y="480" text-anchor="middle" font-size="10" fill="#6366f1">head_block updated after each block commit</text>
 
   <!-- Arrow: replay_block → StateDb -->

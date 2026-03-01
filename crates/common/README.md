@@ -7,7 +7,7 @@ Shared EVM types and encoding helpers used across the workspace.
 ### `AccountInfo`
 Represents on-chain account state: `nonce` (u64), `balance` (U256), and `code_hash` (B256).
 
-Provides fixed-size 72-byte binary encoding (`to_bytes` / `from_bytes`) for efficient storage in libmdbx:
+Provides fixed-size 72-byte binary encoding (`to_bytes` / `from_bytes`) for efficient storage in the database:
 - Bytes 0..8: nonce (big-endian u64)
 - Bytes 8..40: balance (big-endian U256)
 - Bytes 40..72: code_hash (raw B256)

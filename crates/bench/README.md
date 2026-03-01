@@ -32,6 +32,6 @@ RPC_URL=https://polygon-rpc.com cargo run --release -p evm-state-bench --bin rep
 
 ## How it works
 
-The benchmarks spin up a local API server backed by an in-memory libmdbx database pre-populated with synthetic state. The `StateClient` and `RemoteDB` from `evm-state-client` are used to make requests, measuring round-trip latency.
+The benchmarks spin up a local API server backed by an in-memory RocksDB database pre-populated with synthetic state. The `StateClient` and `RemoteDB` from `evm-state-client` are used to make requests, measuring round-trip latency.
 
 When `RPC_URL` is set, the same operations are also performed against the external RPC for a head-to-head comparison.

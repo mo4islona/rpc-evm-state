@@ -40,26 +40,26 @@ curl -Lo genesis.json \
   https://raw.githubusercontent.com/maticnetwork/bor/develop/builder/files/genesis-mainnet-v1.json
 
 # Import genesis allocations into the database
-cargo run --release --bin evm-state -- --db ./polygon.mdbx genesis genesis.json
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb genesis genesis.json
 
 # Replay blocks 1 → 2,000,000 from the Subsquid Network
-cargo run --release --bin evm-state -- --db ./polygon.mdbx replay --to 2000000
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb replay --to 2000000
 
 # Start the API server
-cargo run --release --bin evm-state -- --db ./polygon.mdbx serve --listen 0.0.0.0:3000
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb serve --listen 0.0.0.0:3000
 ```
 
 ### Other commands
 
 ```sh
 # Import a pre-built state snapshot (skips replay)
-cargo run --release --bin evm-state -- --db ./polygon.mdbx import snapshot.jsonl.zst
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb import snapshot.jsonl.zst
 
 # Export current state to a snapshot
-cargo run --release --bin evm-state -- --db ./polygon.mdbx export snapshot.jsonl.zst
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb export snapshot.jsonl.zst
 
 # Validate local state against an archive RPC
-cargo run --release --bin evm-state -- --db ./polygon.mdbx validate --rpc-url https://polygon-rpc.com --samples 100
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb validate --rpc-url https://polygon-rpc.com --samples 100
 ```
 
 ## Configuration
@@ -68,14 +68,14 @@ All settings can be provided via CLI flags, environment variables, or a TOML con
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--db` | `EVM_STATE_DB` | `./state.mdbx` | Database path |
+| `--db` | `EVM_STATE_DB` | `./state.rocksdb` | Database path |
 | `--chain-id` | `EVM_STATE_CHAIN_ID` | `137` | Chain ID (1 = Ethereum, 137 = Polygon) |
 | `--config` | — | — | TOML config file path |
 | `--log-level` | `EVM_STATE_LOG` | `info` | Log level |
 
 Example `config.toml`:
 ```toml
-db_path = "./polygon.mdbx"
+db_path = "./polygon.rocksdb"
 chain_id = 137
 listen = "0.0.0.0:3000"
 portal = "https://portal.sqd.dev"
@@ -127,7 +127,7 @@ crates/
   common/          Shared EVM types (AccountInfo, key encoding)
   data-types/      Block & transaction types (SQD Network format)
   chain-spec/      Hardfork schedules (Ethereum, Polygon)
-  state-db/        Flat KV database (libmdbx) + revm Database trait
+  state-db/        Flat KV database (RocksDB) + revm Database trait
   replayer/        Single-block & pipeline execution with revm
   sqd-fetcher/     Async block streaming from Subsquid Network
   snapshot/        JSON Lines importer with zstd + resume support

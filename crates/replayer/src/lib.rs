@@ -192,7 +192,7 @@ fn is_system_tx(tx: &Transaction) -> bool {
 /// stream is incomplete (missing state sync data). The portal's `stateDiffs`
 /// endpoint captures the correct final state including consensus-injected changes.
 pub fn apply_state_diffs(db: &StateDb, block: &Block) -> Result<()> {
-    let batch = db.write_batch()?;
+    let mut batch = db.write_batch()?;
 
     if !block.state_diffs.is_empty() {
         // Group diffs by address.
@@ -287,7 +287,7 @@ fn flush_cache_to_db(
     cache_db: &CacheDB<&StateDb>,
     block_number: Option<u64>,
 ) -> Result<()> {
-    let batch = db.write_batch()?;
+    let mut batch = db.write_batch()?;
 
     for (address, cached_account) in &cache_db.cache.accounts {
         match cached_account.account_state {

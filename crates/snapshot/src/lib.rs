@@ -249,7 +249,7 @@ pub fn export_snapshot(
     for (address, info) in db.iter_accounts()? {
         writeln!(
             writer,
-            r#"{{"type":"account","address":"0x{:x}","nonce":{},"balance":"0x{:x}","codeHash":"0x{}"}}"#,
+            r#"{{"type":"account","address":"0x{:x}","nonce":{},"balance":"0x{:x}","codeHash":"0x{:x}"}}"#,
             address, info.nonce, info.balance, info.code_hash
         )?;
         stats.accounts += 1;
@@ -263,7 +263,7 @@ pub fn export_snapshot(
     for (address, slot, value) in db.iter_storage()? {
         writeln!(
             writer,
-            r#"{{"type":"storage","address":"0x{:x}","slot":"0x{}","value":"0x{}"}}"#,
+            r#"{{"type":"storage","address":"0x{:x}","slot":"0x{:x}","value":"0x{:x}"}}"#,
             address, slot, value
         )?;
         stats.storage_slots += 1;
@@ -277,7 +277,7 @@ pub fn export_snapshot(
     for (code_hash, bytecode) in db.iter_code()? {
         writeln!(
             writer,
-            r#"{{"type":"code","codeHash":"0x{}","bytecode":"0x{}"}}"#,
+            r#"{{"type":"code","codeHash":"0x{:x}","bytecode":"0x{}"}}"#,
             code_hash,
             hex::encode(&bytecode)
         )?;
@@ -457,7 +457,7 @@ mod tests {
 
         // Manually import first 3 lines to simulate previous partial import.
         {
-            let batch = db.write_batch().unwrap();
+            let mut batch = db.write_batch().unwrap();
             // Line 1: account vitalik
             batch
                 .set_account(

@@ -18,7 +18,7 @@ These options apply to all subcommands:
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--db <PATH>` | `EVM_STATE_DB` | `./state.mdbx` | Database path |
+| `--db <PATH>` | `EVM_STATE_DB` | `./state.rocksdb` | Database path |
 | `--chain-id <ID>` | `EVM_STATE_CHAIN_ID` | `137` | Chain ID (1 = Ethereum, 137 = Polygon) |
 | `--config <PATH>` | — | — | Path to a TOML config file |
 | `--log-level <LEVEL>` | `EVM_STATE_LOG` | `info` | Log level filter |
@@ -35,7 +35,7 @@ Settings are resolved in this priority order (highest wins):
 ### Config File Format
 
 ```toml
-db_path = "./state.mdbx"
+db_path = "./state.rocksdb"
 chain_id = 137
 log_level = "info"
 listen = "0.0.0.0:3000"
@@ -53,7 +53,7 @@ All fields are optional.
 evm-state serve
 
 # Start with custom listen address and database
-evm-state --db /data/polygon.mdbx serve --listen 127.0.0.1:8080
+evm-state --db /data/polygon.rocksdb serve --listen 127.0.0.1:8080
 
 # Replay Polygon blocks from the SQD Network
 evm-state replay

@@ -55,7 +55,7 @@ Features:
 
 ## Error handling
 
-- Database errors (libmdbx failures) propagate as `Error::Db`.
+- Database errors (RocksDB failures) propagate as `Error::Db`.
 - EVM execution errors (invalid header, missing fields) propagate as `Error::Evm` with the failing transaction index.
 - Block source errors (stream failures, block gaps) propagate as `Error::Source`.
 - Reverted transactions are **not** errors — they produce `TxResult { success: false }` and their gas is consumed, but state changes from the revert are rolled back by revm.

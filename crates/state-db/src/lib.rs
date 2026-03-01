@@ -4,12 +4,12 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, U256};
 use evm_state_common::{AccountInfo, AccountKey, StorageKey};
-use libmdbx::{Database, DatabaseOptions, NoWriteMap, TableFlags, Transaction, WriteFlags, RW};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch as RocksWriteBatch, DB};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("database error: {0}")]
-    Db(#[from] libmdbx::Error),
+    Db(#[from] rocksdb::Error),
 
     #[error("failed to decode account: {0}")]
     AccountDecode(#[from] evm_state_common::AccountDecodeError),
@@ -29,115 +29,139 @@ const TABLE_CODE: &str = "code";
 const TABLE_METADATA: &str = "metadata";
 
 const META_KEY_HEAD_BLOCK: &[u8] = b"head_block";
-const NUM_TABLES: usize = 4;
 
-/// Flat KV state database backed by libmdbx.
+/// Flat KV state database backed by RocksDB.
 ///
-/// Stores latest EVM state in four tables:
+/// Stores latest EVM state in four column families:
 /// - `accounts`:  `[address:20B]` → `[nonce:8B][balance:32B][code_hash:32B]`
 /// - `storage`:   `[address:20B][slot:32B]` → `[value:32B]`
 /// - `code`:      `[code_hash:32B]` → `[bytecode:var]`
 /// - `metadata`:  `b"head_block"` → `[block_number:8B]`
 pub struct StateDb {
-    db: Database<NoWriteMap>,
+    db: DB,
 }
 
 impl StateDb {
     /// Open or create a state database at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut opts = DatabaseOptions::default();
-        opts.max_tables = Some(NUM_TABLES as u64);
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
 
-        let db = Database::<NoWriteMap>::open_with_options(path, opts)?;
+        let cf_descriptors = [TABLE_ACCOUNTS, TABLE_STORAGE, TABLE_CODE, TABLE_METADATA]
+            .iter()
+            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()));
 
-        // Create all tables on first open.
-        {
-            let txn = db.begin_rw_txn()?;
-            txn.create_table(Some(TABLE_ACCOUNTS), TableFlags::empty())?;
-            txn.create_table(Some(TABLE_STORAGE), TableFlags::empty())?;
-            txn.create_table(Some(TABLE_CODE), TableFlags::empty())?;
-            txn.create_table(Some(TABLE_METADATA), TableFlags::empty())?;
-            txn.commit()?;
-        }
-
+        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
         Ok(Self { db })
     }
 
-    // ── Read operations (read-only transaction) ───────────────────────
+    // ── Read operations ───────────────────────────────────────────────
 
     pub fn get_account(&self, address: &Address) -> Result<Option<AccountInfo>> {
-        let txn = self.db.begin_ro_txn()?;
-        self.get_account_with_txn(&txn, address)
+        let cf = self.db.cf_handle(TABLE_ACCOUNTS).expect("accounts CF must exist");
+        let key = AccountKey(*address);
+        match self.db.get_cf(&cf, key.to_bytes())? {
+            Some(bytes) => Ok(Some(AccountInfo::from_bytes(&bytes)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn get_storage(&self, address: &Address, slot: &B256) -> Result<Option<U256>> {
-        let txn = self.db.begin_ro_txn()?;
-        self.get_storage_with_txn(&txn, address, slot)
+        let cf = self.db.cf_handle(TABLE_STORAGE).expect("storage CF must exist");
+        let key = StorageKey::new(*address, *slot);
+        match self.db.get_cf(&cf, key.to_bytes())? {
+            Some(bytes) => {
+                if bytes.len() != 32 {
+                    return Err(Error::InvalidStorageValue(bytes.len()));
+                }
+                Ok(Some(U256::from_be_bytes::<32>(
+                    bytes.as_slice().try_into().unwrap(),
+                )))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn get_code(&self, code_hash: &B256) -> Result<Option<Vec<u8>>> {
-        let txn = self.db.begin_ro_txn()?;
-        self.get_code_with_txn(&txn, code_hash)
+        let cf = self.db.cf_handle(TABLE_CODE).expect("code CF must exist");
+        match self.db.get_cf(&cf, code_hash.as_slice())? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => Ok(None),
+        }
     }
 
     pub fn get_head_block(&self) -> Result<Option<u64>> {
-        let txn = self.db.begin_ro_txn()?;
-        self.get_head_block_with_txn(&txn)
+        let cf = self.db.cf_handle(TABLE_METADATA).expect("metadata CF must exist");
+        match self.db.get_cf(&cf, META_KEY_HEAD_BLOCK)? {
+            Some(bytes) => {
+                if bytes.len() != 8 {
+                    return Err(Error::InvalidHeadBlock(bytes.len()));
+                }
+                Ok(Some(u64::from_be_bytes(
+                    bytes.as_slice().try_into().unwrap(),
+                )))
+            }
+            None => Ok(None),
+        }
     }
 
     // ── Write operations (single-item convenience) ────────────────────
 
     pub fn set_account(&self, address: &Address, info: &AccountInfo) -> Result<()> {
-        let txn = self.db.begin_rw_txn()?;
-        self.set_account_with_txn(&txn, address, info)?;
-        txn.commit()?;
+        let cf = self.db.cf_handle(TABLE_ACCOUNTS).expect("accounts CF must exist");
+        let key = AccountKey(*address);
+        self.db.put_cf(&cf, key.to_bytes(), info.to_bytes())?;
         Ok(())
     }
 
     pub fn set_storage(&self, address: &Address, slot: &B256, value: &U256) -> Result<()> {
-        let txn = self.db.begin_rw_txn()?;
-        self.set_storage_with_txn(&txn, address, slot, value)?;
-        txn.commit()?;
+        let cf = self.db.cf_handle(TABLE_STORAGE).expect("storage CF must exist");
+        let key = StorageKey::new(*address, *slot);
+        self.db.put_cf(&cf, key.to_bytes(), value.to_be_bytes::<32>())?;
         Ok(())
     }
 
     pub fn set_code(&self, code_hash: &B256, bytecode: &[u8]) -> Result<()> {
-        let txn = self.db.begin_rw_txn()?;
-        self.set_code_with_txn(&txn, code_hash, bytecode)?;
-        txn.commit()?;
+        let cf = self.db.cf_handle(TABLE_CODE).expect("code CF must exist");
+        self.db.put_cf(&cf, code_hash.as_slice(), bytecode)?;
         Ok(())
     }
 
     pub fn set_head_block(&self, block_number: u64) -> Result<()> {
-        let txn = self.db.begin_rw_txn()?;
-        self.set_head_block_with_txn(&txn, block_number)?;
-        txn.commit()?;
+        let cf = self.db.cf_handle(TABLE_METADATA).expect("metadata CF must exist");
+        self.db.put_cf(&cf, META_KEY_HEAD_BLOCK, block_number.to_be_bytes())?;
         Ok(())
     }
 
     pub fn delete_account(&self, address: &Address) -> Result<bool> {
-        let txn = self.db.begin_rw_txn()?;
-        let deleted = self.delete_account_with_txn(&txn, address)?;
-        txn.commit()?;
-        Ok(deleted)
+        let cf = self.db.cf_handle(TABLE_ACCOUNTS).expect("accounts CF must exist");
+        let key = AccountKey(*address);
+        let existed = self.db.get_cf(&cf, key.to_bytes())?.is_some();
+        if existed {
+            self.db.delete_cf(&cf, key.to_bytes())?;
+        }
+        Ok(existed)
     }
 
     pub fn delete_storage(&self, address: &Address, slot: &B256) -> Result<bool> {
-        let txn = self.db.begin_rw_txn()?;
-        let deleted = self.delete_storage_with_txn(&txn, address, slot)?;
-        txn.commit()?;
-        Ok(deleted)
+        let cf = self.db.cf_handle(TABLE_STORAGE).expect("storage CF must exist");
+        let key = StorageKey::new(*address, *slot);
+        let existed = self.db.get_cf(&cf, key.to_bytes())?.is_some();
+        if existed {
+            self.db.delete_cf(&cf, key.to_bytes())?;
+        }
+        Ok(existed)
     }
 
     // ── Iteration ──────────────────────────────────────────────────────
 
     /// Collect all accounts as `(Address, AccountInfo)` pairs.
     pub fn iter_accounts(&self) -> Result<Vec<(Address, AccountInfo)>> {
-        let txn = self.db.begin_ro_txn()?;
-        let table = txn.open_table(Some(TABLE_ACCOUNTS))?;
-        let mut cursor = txn.cursor(&table)?;
+        let cf = self.db.cf_handle(TABLE_ACCOUNTS).expect("accounts CF must exist");
+        let iter = self.db.iterator_cf(&cf, IteratorMode::Start);
         let mut result = Vec::new();
-        for item in cursor.iter_start::<Vec<u8>, Vec<u8>>() {
+        for item in iter {
             let (key_bytes, val_bytes) = item?;
             if key_bytes.len() != 20 {
                 continue;
@@ -151,18 +175,17 @@ impl StateDb {
 
     /// Collect all storage entries as `(Address, B256, U256)` triples.
     pub fn iter_storage(&self) -> Result<Vec<(Address, B256, U256)>> {
-        let txn = self.db.begin_ro_txn()?;
-        let table = txn.open_table(Some(TABLE_STORAGE))?;
-        let mut cursor = txn.cursor(&table)?;
+        let cf = self.db.cf_handle(TABLE_STORAGE).expect("storage CF must exist");
+        let iter = self.db.iterator_cf(&cf, IteratorMode::Start);
         let mut result = Vec::new();
-        for item in cursor.iter_start::<Vec<u8>, Vec<u8>>() {
+        for item in iter {
             let (key_bytes, val_bytes) = item?;
             if key_bytes.len() != 52 || val_bytes.len() != 32 {
                 continue;
             }
             let address = Address::from_slice(&key_bytes[..20]);
             let slot = B256::from_slice(&key_bytes[20..52]);
-            let value = U256::from_be_bytes::<32>(val_bytes.as_slice().try_into().unwrap());
+            let value = U256::from_be_bytes::<32>(val_bytes.as_ref().try_into().unwrap());
             result.push((address, slot, value));
         }
         Ok(result)
@@ -170,11 +193,10 @@ impl StateDb {
 
     /// Collect all code entries as `(B256, Vec<u8>)` pairs (code_hash, bytecode).
     pub fn iter_code(&self) -> Result<Vec<(B256, Vec<u8>)>> {
-        let txn = self.db.begin_ro_txn()?;
-        let table = txn.open_table(Some(TABLE_CODE))?;
-        let mut cursor = txn.cursor(&table)?;
+        let cf = self.db.cf_handle(TABLE_CODE).expect("code CF must exist");
+        let iter = self.db.iterator_cf(&cf, IteratorMode::Start);
         let mut result = Vec::new();
-        for item in cursor.iter_start::<Vec<u8>, Vec<u8>>() {
+        for item in iter {
             let (key_bytes, val_bytes) = item?;
             if key_bytes.len() != 32 {
                 continue;
@@ -188,196 +210,69 @@ impl StateDb {
     // ── Batch write ───────────────────────────────────────────────────
 
     /// Begin a batch write. All operations on the returned `WriteBatch` are
-    /// performed in a single libmdbx write transaction and committed atomically.
+    /// buffered in memory and committed atomically when `commit()` is called.
     pub fn write_batch(&self) -> Result<WriteBatch<'_>> {
-        let txn = self.db.begin_rw_txn()?;
-        Ok(WriteBatch { db: self, txn })
-    }
-
-    // ── Internal helpers (generic over RO/RW) ─────────────────────────
-
-    fn get_account_with_txn<K: libmdbx::TransactionKind>(
-        &self,
-        txn: &Transaction<'_, K, NoWriteMap>,
-        address: &Address,
-    ) -> Result<Option<AccountInfo>> {
-        let table = txn.open_table(Some(TABLE_ACCOUNTS))?;
-        let key = AccountKey(*address);
-        let val: Option<Vec<u8>> = txn.get(&table, key.to_bytes().as_slice())?;
-        match val {
-            Some(bytes) => Ok(Some(AccountInfo::from_bytes(&bytes)?)),
-            None => Ok(None),
-        }
-    }
-
-    fn get_storage_with_txn<K: libmdbx::TransactionKind>(
-        &self,
-        txn: &Transaction<'_, K, NoWriteMap>,
-        address: &Address,
-        slot: &B256,
-    ) -> Result<Option<U256>> {
-        let table = txn.open_table(Some(TABLE_STORAGE))?;
-        let key = StorageKey::new(*address, *slot);
-        let val: Option<Vec<u8>> = txn.get(&table, key.to_bytes().as_slice())?;
-        match val {
-            Some(bytes) => {
-                if bytes.len() != 32 {
-                    return Err(Error::InvalidStorageValue(bytes.len()));
-                }
-                Ok(Some(U256::from_be_bytes::<32>(
-                    bytes.as_slice().try_into().unwrap(),
-                )))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn get_code_with_txn<K: libmdbx::TransactionKind>(
-        &self,
-        txn: &Transaction<'_, K, NoWriteMap>,
-        code_hash: &B256,
-    ) -> Result<Option<Vec<u8>>> {
-        let table = txn.open_table(Some(TABLE_CODE))?;
-        let val: Option<Vec<u8>> = txn.get(&table, code_hash.as_slice())?;
-        Ok(val)
-    }
-
-    fn get_head_block_with_txn<K: libmdbx::TransactionKind>(
-        &self,
-        txn: &Transaction<'_, K, NoWriteMap>,
-    ) -> Result<Option<u64>> {
-        let table = txn.open_table(Some(TABLE_METADATA))?;
-        let val: Option<Vec<u8>> = txn.get(&table, META_KEY_HEAD_BLOCK)?;
-        match val {
-            Some(bytes) => {
-                if bytes.len() != 8 {
-                    return Err(Error::InvalidHeadBlock(bytes.len()));
-                }
-                Ok(Some(u64::from_be_bytes(
-                    bytes.as_slice().try_into().unwrap(),
-                )))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn set_account_with_txn(
-        &self,
-        txn: &Transaction<'_, RW, NoWriteMap>,
-        address: &Address,
-        info: &AccountInfo,
-    ) -> Result<()> {
-        let table = txn.open_table(Some(TABLE_ACCOUNTS))?;
-        let key = AccountKey(*address);
-        txn.put(
-            &table,
-            key.to_bytes(),
-            info.to_bytes(),
-            WriteFlags::UPSERT,
-        )?;
-        Ok(())
-    }
-
-    fn set_storage_with_txn(
-        &self,
-        txn: &Transaction<'_, RW, NoWriteMap>,
-        address: &Address,
-        slot: &B256,
-        value: &U256,
-    ) -> Result<()> {
-        let table = txn.open_table(Some(TABLE_STORAGE))?;
-        let key = StorageKey::new(*address, *slot);
-        txn.put(
-            &table,
-            key.to_bytes(),
-            value.to_be_bytes::<32>(),
-            WriteFlags::UPSERT,
-        )?;
-        Ok(())
-    }
-
-    fn set_code_with_txn(
-        &self,
-        txn: &Transaction<'_, RW, NoWriteMap>,
-        code_hash: &B256,
-        bytecode: &[u8],
-    ) -> Result<()> {
-        let table = txn.open_table(Some(TABLE_CODE))?;
-        txn.put(&table, code_hash.as_slice(), bytecode, WriteFlags::UPSERT)?;
-        Ok(())
-    }
-
-    fn set_head_block_with_txn(
-        &self,
-        txn: &Transaction<'_, RW, NoWriteMap>,
-        block_number: u64,
-    ) -> Result<()> {
-        let table = txn.open_table(Some(TABLE_METADATA))?;
-        txn.put(
-            &table,
-            META_KEY_HEAD_BLOCK,
-            block_number.to_be_bytes(),
-            WriteFlags::UPSERT,
-        )?;
-        Ok(())
-    }
-
-    fn delete_account_with_txn(
-        &self,
-        txn: &Transaction<'_, RW, NoWriteMap>,
-        address: &Address,
-    ) -> Result<bool> {
-        let table = txn.open_table(Some(TABLE_ACCOUNTS))?;
-        let key = AccountKey(*address);
-        Ok(txn.del(&table, key.to_bytes(), None)?)
-    }
-
-    fn delete_storage_with_txn(
-        &self,
-        txn: &Transaction<'_, RW, NoWriteMap>,
-        address: &Address,
-        slot: &B256,
-    ) -> Result<bool> {
-        let table = txn.open_table(Some(TABLE_STORAGE))?;
-        let key = StorageKey::new(*address, *slot);
-        Ok(txn.del(&table, key.to_bytes(), None)?)
+        Ok(WriteBatch {
+            db: self,
+            batch: RocksWriteBatch::default(),
+        })
     }
 }
 
-/// A batch of writes executed atomically in a single libmdbx transaction.
+/// A batch of writes executed atomically via a RocksDB WriteBatch.
+///
+/// If dropped without calling `commit()`, no writes are applied.
 pub struct WriteBatch<'a> {
     db: &'a StateDb,
-    txn: Transaction<'a, RW, NoWriteMap>,
+    batch: RocksWriteBatch,
 }
 
-impl<'a> WriteBatch<'a> {
-    pub fn set_account(&self, address: &Address, info: &AccountInfo) -> Result<()> {
-        self.db.set_account_with_txn(&self.txn, address, info)
+impl WriteBatch<'_> {
+    pub fn set_account(&mut self, address: &Address, info: &AccountInfo) -> Result<()> {
+        let cf = self.db.db.cf_handle(TABLE_ACCOUNTS).expect("accounts CF must exist");
+        let key = AccountKey(*address);
+        self.batch.put_cf(&cf, key.to_bytes(), info.to_bytes());
+        Ok(())
     }
 
-    pub fn set_storage(&self, address: &Address, slot: &B256, value: &U256) -> Result<()> {
-        self.db.set_storage_with_txn(&self.txn, address, slot, value)
+    pub fn set_storage(&mut self, address: &Address, slot: &B256, value: &U256) -> Result<()> {
+        let cf = self.db.db.cf_handle(TABLE_STORAGE).expect("storage CF must exist");
+        let key = StorageKey::new(*address, *slot);
+        self.batch.put_cf(&cf, key.to_bytes(), value.to_be_bytes::<32>());
+        Ok(())
     }
 
-    pub fn set_code(&self, code_hash: &B256, bytecode: &[u8]) -> Result<()> {
-        self.db.set_code_with_txn(&self.txn, code_hash, bytecode)
+    pub fn set_code(&mut self, code_hash: &B256, bytecode: &[u8]) -> Result<()> {
+        let cf = self.db.db.cf_handle(TABLE_CODE).expect("code CF must exist");
+        self.batch.put_cf(&cf, code_hash.as_slice(), bytecode);
+        Ok(())
     }
 
-    pub fn set_head_block(&self, block_number: u64) -> Result<()> {
-        self.db.set_head_block_with_txn(&self.txn, block_number)
+    pub fn set_head_block(&mut self, block_number: u64) -> Result<()> {
+        let cf = self.db.db.cf_handle(TABLE_METADATA).expect("metadata CF must exist");
+        self.batch.put_cf(&cf, META_KEY_HEAD_BLOCK, block_number.to_be_bytes());
+        Ok(())
     }
 
-    pub fn delete_account(&self, address: &Address) -> Result<bool> {
-        self.db.delete_account_with_txn(&self.txn, address)
+    pub fn delete_account(&mut self, address: &Address) -> Result<bool> {
+        let cf = self.db.db.cf_handle(TABLE_ACCOUNTS).expect("accounts CF must exist");
+        let key = AccountKey(*address);
+        let existed = self.db.db.get_cf(&cf, key.to_bytes())?.is_some();
+        self.batch.delete_cf(&cf, key.to_bytes());
+        Ok(existed)
     }
 
-    pub fn delete_storage(&self, address: &Address, slot: &B256) -> Result<bool> {
-        self.db.delete_storage_with_txn(&self.txn, address, slot)
+    pub fn delete_storage(&mut self, address: &Address, slot: &B256) -> Result<bool> {
+        let cf = self.db.db.cf_handle(TABLE_STORAGE).expect("storage CF must exist");
+        let key = StorageKey::new(*address, *slot);
+        let existed = self.db.db.get_cf(&cf, key.to_bytes())?.is_some();
+        self.batch.delete_cf(&cf, key.to_bytes());
+        Ok(existed)
     }
 
     /// Commit all writes atomically.
     pub fn commit(self) -> Result<()> {
-        self.txn.commit()?;
+        self.db.db.write(self.batch)?;
         Ok(())
     }
 }
@@ -595,7 +490,7 @@ mod tests {
         let slot = B256::ZERO;
         let code_hash = b256!("abcdef0000000000000000000000000000000000000000000000000000000001");
 
-        let batch = db.write_batch().unwrap();
+        let mut batch = db.write_batch().unwrap();
         batch
             .set_account(
                 &addr,
@@ -636,7 +531,7 @@ mod tests {
 
         // Write without committing — should be rolled back on drop
         {
-            let batch = db.write_batch().unwrap();
+            let mut batch = db.write_batch().unwrap();
             batch
                 .set_account(
                     &addr,
@@ -658,7 +553,7 @@ mod tests {
         let (_dir, db) = tmp_db();
         let addr = address!("d8dA6BF26964aF9D7eEd9e03E53415D37aA96045");
 
-        let batch = db.write_batch().unwrap();
+        let mut batch = db.write_batch().unwrap();
         for i in 0u64..100 {
             let slot = B256::from(U256::from(i));
             batch.set_storage(&addr, &slot, &U256::from(i * 10)).unwrap();
@@ -690,7 +585,7 @@ mod tests {
         .unwrap();
 
         // Delete it in a batch
-        let batch = db.write_batch().unwrap();
+        let mut batch = db.write_batch().unwrap();
         assert!(batch.delete_account(&addr).unwrap());
         batch.commit().unwrap();
 
@@ -709,7 +604,7 @@ mod tests {
         // Write data
         {
             let db = StateDb::open(dir.path()).unwrap();
-            let batch = db.write_batch().unwrap();
+            let mut batch = db.write_batch().unwrap();
             batch
                 .set_account(
                     &addr,
@@ -766,8 +661,6 @@ mod tests {
         // Multiple concurrent read transactions should all succeed
         let handles: Vec<_> = (0..4)
             .map(|_| {
-                // We can't move `db` across threads, but we can verify
-                // multiple ro txns work from the same thread.
                 let a = db.get_account(&addr).unwrap().unwrap();
                 assert_eq!(a.nonce, 1);
                 a

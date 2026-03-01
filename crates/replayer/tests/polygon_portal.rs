@@ -98,7 +98,7 @@ fn deser_nonce<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D:
 }
 
 fn import_genesis(db: &StateDb, genesis: &GenesisFile) {
-    let batch = db.write_batch().unwrap();
+    let mut batch = db.write_batch().unwrap();
     for (address, account) in &genesis.alloc {
         let code_hash = if let Some(code) = &account.code {
             let hash = keccak256(code);

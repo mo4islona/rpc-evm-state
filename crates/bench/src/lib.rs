@@ -39,7 +39,7 @@ pub fn setup_populated_db(
 
     db.set_code(&code_hash.into(), &bytecode).unwrap();
 
-    let batch = db.write_batch().unwrap();
+    let mut batch = db.write_batch().unwrap();
     for i in 0..num_accounts {
         let addr = account_address(i);
 
@@ -91,7 +91,7 @@ pub fn setup_tick_scan_db(num_slots: usize) -> (tempfile::TempDir, Arc<AppState>
     )
     .unwrap();
 
-    let batch = db.write_batch().unwrap();
+    let mut batch = db.write_batch().unwrap();
     for slot_idx in 0..num_slots {
         let slot = B256::from(U256::from(slot_idx));
         let value = U256::from(slot_idx * 100 + 1);
