@@ -4,7 +4,10 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, U256};
 use evm_state_common::{AccountInfo, AccountKey, StorageKey};
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch as RocksWriteBatch, DB};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, IteratorMode, Options,
+    WriteBatch as RocksWriteBatch, DB,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -44,15 +47,36 @@ pub struct StateDb {
 impl StateDb {
     /// Open or create a state database at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        db_opts.increase_parallelism(std::thread::available_parallelism().map_or(4, |n| n.get()) as i32);
 
-        let cf_descriptors = [TABLE_ACCOUNTS, TABLE_STORAGE, TABLE_CODE, TABLE_METADATA]
-            .iter()
-            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()));
+        // Shared block cache across all column families (default 8 MB is too small).
+        let cache = Cache::new_lru_cache(64 * 1024 * 1024);
 
-        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
+        // Column family options with bloom filters and shared block cache.
+        // 10-bit bloom filters eliminate >99% of disk reads for non-existent keys,
+        // which is the dominant access pattern for EVM storage (most SLOAD returns zero).
+        let cf_opts_with_bloom = || {
+            let mut opts = Options::default();
+            let mut table_opts = BlockBasedOptions::default();
+            table_opts.set_bloom_filter(10.0, false);
+            table_opts.set_block_cache(&cache);
+            table_opts.set_cache_index_and_filter_blocks(true);
+            table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+            opts.set_block_based_table_factory(&table_opts);
+            opts
+        };
+
+        let cf_descriptors = vec![
+            ColumnFamilyDescriptor::new(TABLE_ACCOUNTS, cf_opts_with_bloom()),
+            ColumnFamilyDescriptor::new(TABLE_STORAGE, cf_opts_with_bloom()),
+            ColumnFamilyDescriptor::new(TABLE_CODE, cf_opts_with_bloom()),
+            ColumnFamilyDescriptor::new(TABLE_METADATA, Options::default()),
+        ];
+
+        let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors)?;
         Ok(Self { db })
     }
 
@@ -152,6 +176,21 @@ impl StateDb {
             self.db.delete_cf(&cf, key.to_bytes())?;
         }
         Ok(existed)
+    }
+
+    // ── Maintenance ────────────────────────────────────────────────────
+
+    /// Trigger a full compaction on all column families.
+    ///
+    /// This rewrites all SST files, which rebuilds bloom filters, applies
+    /// compression, and reclaims space from deleted keys. Useful after
+    /// changing RocksDB options (e.g. enabling bloom filters on an existing DB).
+    pub fn compact(&self) {
+        for name in [TABLE_ACCOUNTS, TABLE_STORAGE, TABLE_CODE, TABLE_METADATA] {
+            if let Some(cf) = self.db.cf_handle(name) {
+                self.db.compact_range_cf(&cf, None::<&[u8]>, None::<&[u8]>);
+            }
+        }
     }
 
     // ── Iteration ──────────────────────────────────────────────────────

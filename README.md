@@ -60,6 +60,12 @@ cargo run --release --bin evm-state -- --db ./polygon.rocksdb export snapshot.js
 
 # Validate local state against an archive RPC
 cargo run --release --bin evm-state -- --db ./polygon.rocksdb validate --rpc-url https://polygon-rpc.com --samples 100
+
+# Compact the database (rebuilds bloom filters, reclaims space)
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb compact
+
+# Replay with a Prometheus metrics endpoint
+cargo run --release --bin evm-state -- --db ./polygon.rocksdb replay --metrics-listen 0.0.0.0:9090
 ```
 
 ## Configuration
@@ -136,7 +142,8 @@ crates/
   client-wasm/     WASM-compiled client with JS bindings
   validation/      State validator (random sampling, binary search)
   bench/           Benchmarks (criterion)
-  cli/             Unified CLI binary (genesis, replay, serve, import, export, validate)
+  metrics/         Prometheus metrics, InstrumentedStateDb, axum middleware
+  cli/             Unified CLI binary (genesis, replay, serve, import, export, validate, compact)
 
 packages/
   evm-state/       TypeScript SDK (@sqd/evm-state) wrapping WASM client
@@ -154,6 +161,7 @@ packages/
 | POST | `/v1/batch` | Multiple queries in one request |
 | POST | `/v1/prefetch` | Execute call + return state slice |
 | WS | `/v1/stream` | Interactive WebSocket queries |
+| GET | `/metrics` | Prometheus metrics (request latency, DB latency, head block, WS connections) |
 
 ## Benchmarks
 

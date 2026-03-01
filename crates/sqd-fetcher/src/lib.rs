@@ -169,6 +169,7 @@ pub struct SqdFetcher {
     portal_url: String,
     use_state_diffs: bool,
     bytes_downloaded: Arc<AtomicU64>,
+    portal_head: Arc<AtomicU64>,
 }
 
 impl SqdFetcher {
@@ -192,12 +193,19 @@ impl SqdFetcher {
             portal_url: stream_url.trim_end_matches('/').to_string(),
             use_state_diffs: false,
             bytes_downloaded: Arc::new(AtomicU64::new(0)),
+            portal_head: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Total bytes downloaded from the portal so far.
     pub fn bytes_downloaded(&self) -> u64 {
         self.bytes_downloaded.load(Ordering::Relaxed)
+    }
+
+    /// Latest block number reported by the portal (from `X-SQD-HEAD-NUMBER` header).
+    /// Updated on each streaming response. Returns 0 if no response has been received yet.
+    pub fn portal_head_block(&self) -> u64 {
+        self.portal_head.load(Ordering::Relaxed)
     }
 
     /// Enable state-diffs mode: query `stateDiffs` instead of `transactions`.
@@ -267,6 +275,17 @@ impl SqdFetcher {
                     let resp = resp
                         .error_for_status()
                         .map_err(|e| Error::Portal(format!("portal error: {e}")))?;
+
+                    // Update portal head from response header.
+                    if let Some(head) = resp
+                        .headers()
+                        .get("x-sqd-head-number")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        self.portal_head.store(head, Ordering::Relaxed);
+                    }
+
                     return Ok(resp);
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {

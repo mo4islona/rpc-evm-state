@@ -193,6 +193,9 @@ enum Command {
         file: PathBuf,
     },
 
+    /// Compact the database (rebuilds bloom filters and reclaims space).
+    Compact,
+
     /// Validate local state against a remote Ethereum RPC.
     Validate {
         /// Ethereum JSON-RPC URL.
@@ -376,14 +379,13 @@ async fn run_replay(
 
     // Determine the target block for ETA calculation.
     // Use --to if specified, otherwise query the portal for the latest available block.
-    let target_block = match to {
+    // For open-ended replays, target_block is refreshed from the portal header
+    // on each progress callback.
+    let mut target_block = match to {
         Some(t) => Some(t),
         None => fetcher.get_head_block().await.unwrap_or(None),
     };
-
-    let target_label = target_block
-        .map(|t| fmt_num(t))
-        .unwrap_or_else(|| "∞".into());
+    let fixed_target = to.is_some();
 
     let blocks = fetcher.stream_blocks(start_block, to);
 
@@ -411,6 +413,9 @@ async fn run_replay(
 
     if plain {
         // ── Plain text logging ──────────────────────────────────────
+        let target_label = target_block
+            .map(|t| fmt_num(t))
+            .unwrap_or_else(|| "∞".into());
         info!(
             chain = chain_spec_name,
             chain_id = resolved.chain_id,
@@ -444,6 +449,17 @@ async fn run_replay(
                 let delta_bytes = current_bytes.saturating_sub(prev_bytes);
                 prev_bytes = current_bytes;
                 evm_state_metrics::REPLAYER_BYTES_DOWNLOADED.inc_by(delta_bytes);
+
+                // Refresh target from portal header for open-ended replays.
+                if !fixed_target {
+                    let head = fetcher.portal_head_block();
+                    if head > 0 {
+                        target_block = Some(head);
+                    }
+                }
+                let target_label = target_block
+                    .map(|t| fmt_num(t))
+                    .unwrap_or_else(|| "∞".into());
 
                 if last_log.elapsed() >= log_interval {
                     last_log = std::time::Instant::now();
@@ -493,6 +509,9 @@ async fn run_replay(
         );
     } else {
         // ── TUI mode ────────────────────────────────────────────────
+        let target_label = target_block
+            .map(|t| fmt_num(t))
+            .unwrap_or_else(|| "∞".into());
         eprintln!();
         eprintln!("  \x1b[36m███████╗ ██████╗ ██████╗ \x1b[0m");
         eprintln!("  \x1b[36m██╔════╝██╔═══██╗██╔══██╗\x1b[0m");
@@ -557,6 +576,25 @@ async fn run_replay(
                 let delta_bytes = current_bytes.saturating_sub(prev_bytes);
                 prev_bytes = current_bytes;
                 evm_state_metrics::REPLAYER_BYTES_DOWNLOADED.inc_by(delta_bytes);
+
+                // Refresh target from portal header for open-ended replays.
+                if !fixed_target {
+                    let head = fetcher.portal_head_block();
+                    if head > 0 {
+                        target_block = Some(head);
+                    }
+                }
+                let target_label = target_block
+                    .map(|t| fmt_num(t))
+                    .unwrap_or_else(|| "∞".into());
+
+                // Update progress bar length if target changed.
+                if let Some(target) = target_block {
+                    let new_total = target.saturating_sub(start_block);
+                    if new_total > 0 {
+                        pb.set_length(new_total);
+                    }
+                }
 
                 let done = progress.block_number.saturating_sub(start_block);
                 pb.set_position(done);
@@ -813,6 +851,14 @@ async fn main() -> Result<()> {
         Command::Import { file } => run_import(&resolved, &file),
         Command::Export { file } => run_export(&resolved, &file),
         Command::Genesis { file } => run_genesis(&resolved, &file),
+        Command::Compact => {
+            info!(db = %resolved.db_path, "compacting database");
+            let db = evm_state_db::StateDb::open(&resolved.db_path)
+                .with_context(|| format!("failed to open database at {}", resolved.db_path))?;
+            db.compact();
+            info!("compaction complete");
+            Ok(())
+        }
         Command::Validate { rpc_url, samples } => {
             run_validate(&resolved, &config, rpc_url, samples)
         }

@@ -90,24 +90,29 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
         }
 
         // Log the caller's current nonce from state before executing.
-        if let Some(caller) = tx.from {
-            let db_nonce = db
-                .get_account(&caller)
-                .ok()
-                .flatten()
-                .map(|a| a.nonce)
-                .unwrap_or(0);
-            let cache_nonce = cache_db.cache.accounts.get(&caller).map(|a| a.info.nonce);
-            trace!(
-                block = block.header.number,
-                tx_index = idx,
-                caller = %caller,
-                db_nonce,
-                cache_nonce = ?cache_nonce,
-                tx_nonce = tx.nonce.unwrap_or(0),
-                is_system,
-                "pre-execution state"
-            );
+        // Guard with enabled!() so the RocksDB read only happens when
+        // trace-level logging is active — avoids an unconditional point
+        // lookup per transaction in normal operation.
+        if tracing::enabled!(tracing::Level::TRACE) {
+            if let Some(caller) = tx.from {
+                let db_nonce = db
+                    .get_account(&caller)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.nonce)
+                    .unwrap_or(0);
+                let cache_nonce = cache_db.cache.accounts.get(&caller).map(|a| a.info.nonce);
+                trace!(
+                    block = block.header.number,
+                    tx_index = idx,
+                    caller = %caller,
+                    db_nonce,
+                    cache_nonce = ?cache_nonce,
+                    tx_nonce = tx.nonce.unwrap_or(0),
+                    is_system,
+                    "pre-execution state"
+                );
+            }
         }
 
         // Create a fresh EVM context per transaction (clean journal).
