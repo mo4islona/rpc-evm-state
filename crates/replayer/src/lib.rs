@@ -37,8 +37,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct BlockResult {
     pub block_number: u64,
     pub tx_results: Vec<TxResult>,
-    /// Time spent executing EVM transactions.
-    pub execution_time: Duration,
+    /// Time spent inside `evm.replay()` / `run_system_call()` (opcode execution + DB reads).
+    pub evm_time: Duration,
+    /// Time spent in `cache_db.commit()` (merging state changes into the cache).
+    pub commit_time: Duration,
     /// Time spent writing state changes to disk.
     pub write_time: Duration,
 }
@@ -65,7 +67,8 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     // not EVM-executed — their state changes come from the portal's diffs.
     let has_state_diffs = !block.state_diffs.is_empty();
 
-    let exec_start = Instant::now();
+    let mut evm_time = Duration::ZERO;
+    let mut commit_time = Duration::ZERO;
     for (idx, tx) in block.transactions.iter().enumerate() {
         let is_system = is_system_tx(tx);
 
@@ -117,6 +120,7 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
 
         // Create a fresh EVM context per transaction (clean journal).
         // The CacheDB persists across transactions so state accumulates.
+        let evm_start = Instant::now();
         let result_and_state = {
             let ctx: revm::handler::MainnetContext<&mut CacheDB<&StateDb>> =
                 Context::new(&mut cache_db, spec_id);
@@ -157,16 +161,17 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
                 }
             })?
         }; // evm dropped — releases &mut cache_db
+        evm_time += evm_start.elapsed();
 
         tx_results.push(TxResult {
             gas_used: result_and_state.result.gas_used(),
             success: result_and_state.result.is_success(),
         });
 
+        let commit_start = Instant::now();
         cache_db.commit(result_and_state.state);
+        commit_time += commit_start.elapsed();
     }
-
-    let execution_time = exec_start.elapsed();
 
     let write_start = Instant::now();
     if has_state_diffs {
@@ -185,7 +190,8 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     Ok(BlockResult {
         block_number: block.header.number,
         tx_results,
-        execution_time,
+        evm_time,
+        commit_time,
         write_time,
     })
 }

@@ -142,11 +142,24 @@ pub static REPLAYER_FETCH_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
     hist
 });
 
-pub static REPLAYER_EXEC_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
+pub static REPLAYER_EVM_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
     let hist = Histogram::with_opts(
         HistogramOpts::new(
-            "replayer_exec_duration_seconds",
-            "Per-block EVM execution latency",
+            "replayer_evm_duration_seconds",
+            "Per-block EVM opcode execution latency (includes DB reads on cache miss)",
+        )
+        .namespace(NAMESPACE),
+    )
+    .unwrap();
+    prometheus::register(Box::new(hist.clone())).unwrap();
+    hist
+});
+
+pub static REPLAYER_COMMIT_DURATION: LazyLock<Histogram> = LazyLock::new(|| {
+    let hist = Histogram::with_opts(
+        HistogramOpts::new(
+            "replayer_commit_duration_seconds",
+            "Per-block CacheDB commit latency (merging tx state into block cache)",
         )
         .namespace(NAMESPACE),
     )

@@ -55,8 +55,10 @@ pub struct BlockProgress {
     pub elapsed: std::time::Duration,
     /// Cumulative time spent waiting for the block source (network fetch).
     pub fetch_time: std::time::Duration,
-    /// Cumulative time spent executing EVM transactions.
-    pub execution_time: std::time::Duration,
+    /// Cumulative time inside `evm.replay()` (opcode execution + DB reads on cache miss).
+    pub evm_time: std::time::Duration,
+    /// Cumulative time in `cache_db.commit()` (merging tx state into the block cache).
+    pub commit_time: std::time::Duration,
     /// Cumulative time spent writing state to disk.
     pub write_time: std::time::Duration,
 }
@@ -108,7 +110,8 @@ where
     };
 
     let mut cumulative_fetch = std::time::Duration::ZERO;
-    let mut cumulative_exec = std::time::Duration::ZERO;
+    let mut cumulative_evm = std::time::Duration::ZERO;
+    let mut cumulative_commit = std::time::Duration::ZERO;
     let mut cumulative_write = std::time::Duration::ZERO;
 
     let mut fetch_start = Instant::now();
@@ -139,7 +142,8 @@ where
             PipelineMode::Replay(chain_spec) => {
                 let count = block.transactions.len();
                 let result = replay_block(db, &block, chain_spec)?;
-                cumulative_exec += result.execution_time;
+                cumulative_evm += result.evm_time;
+                cumulative_commit += result.commit_time;
                 cumulative_write += result.write_time;
                 count
             }
@@ -158,7 +162,8 @@ where
             blocks_processed: stats.blocks_processed,
             elapsed: stats.elapsed,
             fetch_time: cumulative_fetch,
-            execution_time: cumulative_exec,
+            evm_time: cumulative_evm,
+            commit_time: cumulative_commit,
             write_time: cumulative_write,
         };
 

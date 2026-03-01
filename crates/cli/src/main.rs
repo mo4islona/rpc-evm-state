@@ -294,16 +294,17 @@ fn fmt_speed(bytes: u64, elapsed: std::time::Duration) -> String {
     }
 }
 
-/// Format pipeline stage timing as "fetch/exec/write" percentages.
+/// Format pipeline stage timing as "fetch/evm/commit/write" percentages.
 fn fmt_stages(progress: &evm_state_replayer::pipeline::BlockProgress) -> String {
     let total = progress.elapsed.as_secs_f64();
     if total <= 0.0 {
-        return "- / - / -".into();
+        return "- / - / - / -".into();
     }
     let f = (progress.fetch_time.as_secs_f64() / total * 100.0) as u64;
-    let e = (progress.execution_time.as_secs_f64() / total * 100.0) as u64;
+    let e = (progress.evm_time.as_secs_f64() / total * 100.0) as u64;
+    let c = (progress.commit_time.as_secs_f64() / total * 100.0) as u64;
     let w = (progress.write_time.as_secs_f64() / total * 100.0) as u64;
-    format!("fetch {f}% / exec {e}% / write {w}%")
+    format!("fetch {f}% / evm {e}% / commit {c}% / write {w}%")
 }
 
 fn dataset_for_chain(chain_id: u64) -> Result<&'static str> {
@@ -407,7 +408,8 @@ async fn run_replay(
 
     // Track previous cumulative times so we can compute per-block deltas.
     let mut prev_fetch = std::time::Duration::ZERO;
-    let mut prev_exec = std::time::Duration::ZERO;
+    let mut prev_evm = std::time::Duration::ZERO;
+    let mut prev_commit = std::time::Duration::ZERO;
     let mut prev_write = std::time::Duration::ZERO;
     let mut prev_bytes: u64 = 0;
 
@@ -435,14 +437,17 @@ async fn run_replay(
                 evm_state_metrics::HEAD_BLOCK.set(progress.block_number as i64);
 
                 let delta_fetch = progress.fetch_time.saturating_sub(prev_fetch);
-                let delta_exec = progress.execution_time.saturating_sub(prev_exec);
+                let delta_evm = progress.evm_time.saturating_sub(prev_evm);
+                let delta_commit = progress.commit_time.saturating_sub(prev_commit);
                 let delta_write = progress.write_time.saturating_sub(prev_write);
                 prev_fetch = progress.fetch_time;
-                prev_exec = progress.execution_time;
+                prev_evm = progress.evm_time;
+                prev_commit = progress.commit_time;
                 prev_write = progress.write_time;
 
                 evm_state_metrics::REPLAYER_FETCH_DURATION.observe(delta_fetch.as_secs_f64());
-                evm_state_metrics::REPLAYER_EXEC_DURATION.observe(delta_exec.as_secs_f64());
+                evm_state_metrics::REPLAYER_EVM_DURATION.observe(delta_evm.as_secs_f64());
+                evm_state_metrics::REPLAYER_COMMIT_DURATION.observe(delta_commit.as_secs_f64());
                 evm_state_metrics::REPLAYER_WRITE_DURATION.observe(delta_write.as_secs_f64());
 
                 let current_bytes = fetcher.bytes_downloaded();
@@ -562,14 +567,17 @@ async fn run_replay(
                 evm_state_metrics::HEAD_BLOCK.set(progress.block_number as i64);
 
                 let delta_fetch = progress.fetch_time.saturating_sub(prev_fetch);
-                let delta_exec = progress.execution_time.saturating_sub(prev_exec);
+                let delta_evm = progress.evm_time.saturating_sub(prev_evm);
+                let delta_commit = progress.commit_time.saturating_sub(prev_commit);
                 let delta_write = progress.write_time.saturating_sub(prev_write);
                 prev_fetch = progress.fetch_time;
-                prev_exec = progress.execution_time;
+                prev_evm = progress.evm_time;
+                prev_commit = progress.commit_time;
                 prev_write = progress.write_time;
 
                 evm_state_metrics::REPLAYER_FETCH_DURATION.observe(delta_fetch.as_secs_f64());
-                evm_state_metrics::REPLAYER_EXEC_DURATION.observe(delta_exec.as_secs_f64());
+                evm_state_metrics::REPLAYER_EVM_DURATION.observe(delta_evm.as_secs_f64());
+                evm_state_metrics::REPLAYER_COMMIT_DURATION.observe(delta_commit.as_secs_f64());
                 evm_state_metrics::REPLAYER_WRITE_DURATION.observe(delta_write.as_secs_f64());
 
                 let current_bytes = fetcher.bytes_downloaded();
