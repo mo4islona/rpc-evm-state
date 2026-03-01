@@ -18,6 +18,7 @@ pub(crate) fn simple_chain_spec() -> ChainSpec {
             spec_id: revm::primitives::hardfork::SpecId::SHANGHAI,
         }],
         requires_state_diffs: false,
+        disable_balance_check: false,
     }
 }
 

@@ -11,7 +11,7 @@ repository = "https://github.com/subsquid/rpc-evm-state"
 # EVM
 alloy-primitives = { version = "1", features = ["serde"] }
 alloy-sol-types = "1"
-revm = "24"
+revm = { version = "24", features = ["optional_balance_check"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

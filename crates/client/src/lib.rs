@@ -541,6 +541,7 @@ mod tests {
                     spec_id: SpecId::SHANGHAI,
                 }],
                 requires_state_diffs: false,
+                disable_balance_check: false,
             },
         });
         (dir, state)

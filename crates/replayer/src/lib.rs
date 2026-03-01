@@ -98,6 +98,7 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
             let ctx = ctx
                 .modify_cfg_chained(|c: &mut revm::context::CfgEnv| {
                     c.chain_id = chain_spec.chain_id;
+                    c.disable_balance_check = chain_spec.disable_balance_check;
                 })
                 .modify_block_chained(|b: &mut revm::context::BlockEnv| *b = block_env.clone())
                 .modify_tx_chained(|t: &mut revm::context::TxEnv| *t = tx_env);

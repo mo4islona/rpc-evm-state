@@ -30,6 +30,10 @@ pub struct ChainSpec {
     /// True for chains like Polygon where consensus-injected state sync
     /// transactions are missing from the SQD portal's transaction stream.
     pub requires_state_diffs: bool,
+    /// Skip the `balance >= gasLimit * gasPrice` pre-validation in revm.
+    /// Required for Polygon where Bor validators historically included
+    /// transactions whose max fee exceeded the sender's balance.
+    pub disable_balance_check: bool,
 }
 
 impl ChainSpec {
@@ -116,6 +120,7 @@ pub fn polygon_mainnet() -> ChainSpec {
             },
         ],
         requires_state_diffs: true,
+        disable_balance_check: true,
     }
 }
 
@@ -210,6 +215,7 @@ pub fn ethereum_mainnet() -> ChainSpec {
             },
         ],
         requires_state_diffs: false,
+        disable_balance_check: false,
     }
 }
 

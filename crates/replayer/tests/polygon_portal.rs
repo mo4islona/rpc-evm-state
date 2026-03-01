@@ -1,16 +1,42 @@
-//! Integration test: replay Polygon blocks 0–2000 from the real SQD portal.
+//! Polygon portal snapshot tests.
 //!
-//! Requires network access. Run with:
-//!   cargo test -p evm-state-replayer --test polygon_portal -- --ignored --nocapture
+//! Two-step workflow:
+//!
+//! **Step 1 — Download fixture** (requires network):
+//!   cargo test -p evm-state-replayer --test polygon_portal update_fixture -- --ignored --nocapture
+//!
+//! Optionally override the block range:
+//!   FIXTURE_FROM=0 FIXTURE_TO=5000 cargo test ... update_fixture -- --ignored --nocapture
+//!
+//! **Step 2 — Replay from fixture** (requires genesis.json, no network):
+//!   cargo test -p evm-state-replayer --test polygon_portal replay -- --ignored --nocapture
 
 use alloy_primitives::{keccak256, B256, U256};
 use evm_state_chain_spec::{from_chain_id, ChainSpec};
 use evm_state_common::AccountInfo;
+use evm_state_data_types::Block;
 use evm_state_db::StateDb;
 use evm_state_replayer::pipeline::{run_pipeline, PipelineMode};
-use evm_state_sqd_fetcher::SqdFetcher;
+use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+// ── Paths ────────────────────────────────────────────────────────────
+
+fn project_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/polygon_blocks_0_2000.ndjson")
+}
 
 // ── Genesis parsing (mirrors crates/cli) ─────────────────────────────
 
@@ -100,18 +126,72 @@ fn import_genesis(db: &StateDb, genesis: &GenesisFile) {
     batch.commit().unwrap();
 }
 
-// ── Test ──────────────────────────────────────────────────────────────
+// ── NDJSON fixture helpers ───────────────────────────────────────────
+
+fn load_blocks_from_fixture(path: &Path) -> Vec<Block> {
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("failed to read fixture {}: {}", path.display(), e));
+    content
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("failed to parse NDJSON line"))
+        .collect()
+}
+
+// ── Step 1: Download fixture from real portal ────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore] // requires network + genesis.json — run with: cargo test -p evm-state-replayer --test polygon_portal -- --ignored --nocapture
+#[ignore] // requires network — run with: cargo test -p evm-state-replayer --test polygon_portal update_fixture -- --ignored --nocapture
+async fn update_fixture() {
+    let from: u64 = std::env::var("FIXTURE_FROM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let to: u64 = std::env::var("FIXTURE_TO")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2000);
+
+    eprintln!("downloading polygon blocks {}–{} from portal...", from, to);
+
+    let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(
+        evm_state_sqd_fetcher::DEFAULT_PORTAL,
+        evm_state_sqd_fetcher::POLYGON_DATASET,
+    );
+
+    let mut stream = std::pin::pin!(fetcher.stream_blocks(from, Some(to)));
+
+    let out_path = fixture_path();
+    std::fs::create_dir_all(out_path.parent().unwrap()).unwrap();
+    let mut file = std::fs::File::create(&out_path).unwrap();
+    let mut count = 0u64;
+
+    while let Some(result) = stream.next().await {
+        let block = result.expect("portal error");
+        let line = serde_json::to_string(&block).expect("failed to serialize block");
+        writeln!(file, "{}", line).unwrap();
+        count += 1;
+        if count % 500 == 0 {
+            eprintln!("  downloaded {} blocks (last: #{})", count, block.header.number);
+        }
+    }
+
+    eprintln!(
+        "wrote {} blocks to {}",
+        count,
+        out_path.display()
+    );
+
+    assert_eq!(count, to - from + 1, "expected {} blocks", to - from + 1);
+}
+
+// ── Step 2: Replay from fixture ──────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore] // requires genesis.json — run with: cargo test -p evm-state-replayer --test polygon_portal replay -- --ignored --nocapture
 async fn replay_polygon_first_2000_blocks() {
     // 1. Load genesis
-    let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("genesis.json");
+    let genesis_path = project_root().join("genesis.json");
     assert!(
         genesis_path.exists(),
         "genesis.json not found at {}. Download it first:\n  \
@@ -127,23 +207,26 @@ async fn replay_polygon_first_2000_blocks() {
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(dir.path()).unwrap();
     import_genesis(&db, &genesis);
-
-    eprintln!(
-        "imported {} genesis accounts",
-        genesis.alloc.len()
-    );
+    eprintln!("imported {} genesis accounts", genesis.alloc.len());
 
     // 3. Get Polygon chain spec
     let chain_spec: ChainSpec = from_chain_id(137).expect("polygon chain spec");
     assert!(chain_spec.disable_balance_check);
 
-    // 4. Stream blocks 0–2000 from real portal
-    let fetcher = SqdFetcher::new(
-        evm_state_sqd_fetcher::DEFAULT_PORTAL,
-        evm_state_sqd_fetcher::POLYGON_DATASET,
+    // 4. Load blocks from fixture
+    let fp = fixture_path();
+    assert!(
+        fp.exists(),
+        "fixture not found at {}. Run update_fixture first:\n  \
+         cargo test -p evm-state-replayer --test polygon_portal update_fixture -- --ignored --nocapture",
+        fp.display()
     );
+    let blocks_vec = load_blocks_from_fixture(&fp);
+    eprintln!("loaded {} blocks from fixture", blocks_vec.len());
 
-    let blocks = fetcher.stream_blocks(0, Some(2000));
+    let blocks = futures::stream::iter(
+        blocks_vec.into_iter().map(Ok::<_, std::convert::Infallible>),
+    );
 
     // 5. Replay
     let stats = run_pipeline(&db, &PipelineMode::Replay(chain_spec), blocks, |p| {

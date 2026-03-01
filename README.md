@@ -195,6 +195,43 @@ Sample output:
     200-tick scan       5.27ms       5.27ms       5.27ms  57664.53ms  57664.53ms  10934.7x
 ```
 
+## Testing
+
+### Unit tests
+
+```sh
+cargo test
+```
+
+### Replayer E2E (Polygon blocks 0–2000)
+
+The replayer has an end-to-end test that replays real Polygon blocks against a snapshot captured from the SQD portal.
+
+**1. Download the genesis file** (one-time):
+
+```sh
+curl -Lo genesis.json \
+  https://raw.githubusercontent.com/maticnetwork/bor/develop/builder/files/genesis-mainnet-v1.json
+```
+
+**2. Update the portal snapshot** (re-run to verify the portal API hasn't changed):
+
+```sh
+cargo test -p evm-state-replayer --test polygon_portal update_fixture -- --ignored --nocapture
+```
+
+Override the block range with env vars (`FIXTURE_FROM` defaults to `0`, `FIXTURE_TO` defaults to `2000`):
+
+```sh
+FIXTURE_FROM=0 FIXTURE_TO=5000 cargo test -p evm-state-replayer --test polygon_portal update_fixture -- --ignored --nocapture
+```
+
+**3. Replay from the snapshot**:
+
+```sh
+cargo test -p evm-state-replayer --test polygon_portal replay -- --ignored --nocapture
+```
+
 ## Supported Networks
 
 | Network | Chain ID | Status |
