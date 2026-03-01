@@ -260,6 +260,33 @@ fn fmt_eta(d: std::time::Duration) -> String {
     }
 }
 
+/// Format a byte count as a human-readable string: "1.2 GB", "456.7 MB", etc.
+fn fmt_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Format download speed: bytes downloaded / elapsed → "12.3 MB/s".
+fn fmt_speed(bytes: u64, elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs > 0.0 {
+        format!("{}/s", fmt_bytes((bytes as f64 / secs) as u64))
+    } else {
+        "- B/s".into()
+    }
+}
+
 fn dataset_for_chain(chain_id: u64) -> Result<&'static str> {
     match chain_id {
         1 => Ok(evm_state_sqd_fetcher::ETHEREUM_DATASET),
@@ -389,9 +416,11 @@ async fn run_replay(
                             0
                         }
                     });
+                    let dl = fmt_speed(fetcher.bytes_downloaded(), progress.elapsed);
                     info!(
                         block = %format!("{}/{}", fmt_num(progress.block_number), target_label),
                         bps = %fmt_num(bps as u64),
+                        dl = %dl,
                         eta = %eta,
                         pct = %pct.map(|p| format!("{p}%")).unwrap_or_else(|| "-".into()),
                         "replay progress"
@@ -405,6 +434,7 @@ async fn run_replay(
             blocks = %fmt_num(stats.blocks_processed),
             elapsed = %fmt_eta(stats.elapsed),
             bps = %fmt_num(stats.blocks_per_sec() as u64),
+            downloaded = %fmt_bytes(fetcher.bytes_downloaded()),
             "replay complete"
         );
     } else {
@@ -469,11 +499,13 @@ async fn run_replay(
                     "-".into()
                 };
 
+                let dl = fmt_speed(fetcher.bytes_downloaded(), progress.elapsed);
                 pb.set_message(format!(
-                    "Block {}/{} | {} blocks/sec | ETA {}",
+                    "Block {}/{} | {} blocks/sec | {} | ETA {}",
                     fmt_num(progress.block_number),
                     target_label,
                     fmt_num(bps as u64),
+                    dl,
                     eta,
                 ));
                 true
@@ -482,10 +514,11 @@ async fn run_replay(
 
         pb.finish_and_clear();
         eprintln!(
-            "  \x1b[32m✓\x1b[0m Done! \x1b[1m{}\x1b[0m blocks in \x1b[1m{}\x1b[0m (\x1b[1m{}\x1b[0m bps)",
+            "  \x1b[32m✓\x1b[0m Done! \x1b[1m{}\x1b[0m blocks in \x1b[1m{}\x1b[0m (\x1b[1m{}\x1b[0m bps, \x1b[1m{}\x1b[0m downloaded)",
             fmt_num(stats.blocks_processed),
             fmt_eta(stats.elapsed),
             fmt_num(stats.blocks_per_sec() as u64),
+            fmt_bytes(fetcher.bytes_downloaded()),
         );
         eprintln!();
     }

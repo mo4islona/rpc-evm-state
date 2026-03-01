@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use evm_state_data_types::Block;
@@ -139,6 +141,7 @@ pub struct SqdFetcher {
     client: reqwest::Client,
     portal_url: String,
     use_state_diffs: bool,
+    bytes_downloaded: Arc<AtomicU64>,
 }
 
 impl SqdFetcher {
@@ -161,7 +164,13 @@ impl SqdFetcher {
             client: reqwest::Client::new(),
             portal_url: stream_url.trim_end_matches('/').to_string(),
             use_state_diffs: false,
+            bytes_downloaded: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Total bytes downloaded from the portal so far.
+    pub fn bytes_downloaded(&self) -> u64 {
+        self.bytes_downloaded.load(Ordering::Relaxed)
     }
 
     /// Enable state-diffs mode: query `stateDiffs` instead of `transactions`.
@@ -260,6 +269,7 @@ impl SqdFetcher {
         from: u64,
         to: Option<u64>,
     ) -> impl Stream<Item = Result<Block, Error>> + '_ {
+        let bytes_counter = self.bytes_downloaded.clone();
         async_stream::try_stream! {
             let mut current = from;
 
@@ -282,6 +292,7 @@ impl SqdFetcher {
                 // Stream the response body, parsing blocks as complete lines arrive.
                 while let Some(chunk) = byte_stream.next().await {
                     let chunk: bytes::Bytes = chunk.map_err(Error::Http)?;
+                    bytes_counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                     buffer.extend_from_slice(&chunk);
 
                     // Process all complete lines in the buffer.
