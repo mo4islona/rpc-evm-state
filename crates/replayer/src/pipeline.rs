@@ -1,4 +1,4 @@
-use crate::{apply_state_diffs, replay_block, Error, Result};
+use crate::{replay_block, Error, Result};
 use evm_state_chain_spec::ChainSpec;
 use evm_state_data_types::Block;
 use evm_state_db::StateDb;
@@ -9,10 +9,12 @@ use std::time::Instant;
 
 /// Controls how blocks are processed in the pipeline.
 pub enum PipelineMode {
-    /// Execute transactions with revm (normal replay).
+    /// Execute transactions with revm.
+    ///
+    /// When a block contains state diffs (hybrid mode), system transactions
+    /// are skipped during EVM execution and their state changes are applied
+    /// from the portal's diffs instead.
     Replay(ChainSpec),
-    /// Apply state diffs directly from the portal (no EVM execution).
-    StateDiffs,
 }
 
 /// Summary statistics from a pipeline run.
@@ -125,11 +127,6 @@ where
             PipelineMode::Replay(chain_spec) => {
                 let count = block.transactions.len();
                 replay_block(db, &block, chain_spec)?;
-                count
-            }
-            PipelineMode::StateDiffs => {
-                let count = block.state_diffs.len();
-                apply_state_diffs(db, &block)?;
                 count
             }
         };

@@ -56,8 +56,22 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
     let mut cache_db = CacheDB::new(db);
     let mut tx_results = Vec::with_capacity(block.transactions.len());
 
+    // When state diffs are available (hybrid mode), system transactions are
+    // not EVM-executed — their state changes come from the portal's diffs.
+    let has_state_diffs = !block.state_diffs.is_empty();
+
     for (idx, tx) in block.transactions.iter().enumerate() {
         let is_system = is_system_tx(tx);
+
+        // In hybrid mode, skip EVM execution for system txs — their state
+        // changes will be applied via state diffs after the regular txs.
+        if is_system && has_state_diffs {
+            tx_results.push(TxResult {
+                gas_used: 0,
+                success: true,
+            });
+            continue;
+        }
 
         let mut tx_env = tx_env_from_transaction(tx, chain_spec.chain_id);
 
@@ -141,8 +155,17 @@ pub fn replay_block(db: &StateDb, block: &Block, chain_spec: &ChainSpec) -> Resu
         cache_db.commit(result_and_state.state);
     }
 
-    // Flush all accumulated changes to StateDb in one atomic batch.
-    flush_cache_to_db(db, &cache_db, block.header.number)?;
+    if has_state_diffs {
+        // Hybrid mode: flush EVM-replayed state WITHOUT setting head_block,
+        // then apply system tx state diffs in a second commit that sets
+        // head_block. Crash-safe: if we crash between the two commits,
+        // head_block is not yet advanced so the block will be re-replayed.
+        flush_cache_to_db(db, &cache_db, None)?;
+        apply_state_diffs(db, block)?;
+    } else {
+        // Normal mode: single atomic commit.
+        flush_cache_to_db(db, &cache_db, Some(block.header.number))?;
+    }
 
     Ok(BlockResult {
         block_number: block.header.number,
@@ -254,7 +277,16 @@ pub fn apply_state_diffs(db: &StateDb, block: &Block) -> Result<()> {
 }
 
 /// Write CacheDB contents to StateDb via a single WriteBatch.
-fn flush_cache_to_db(db: &StateDb, cache_db: &CacheDB<&StateDb>, block_number: u64) -> Result<()> {
+///
+/// When `block_number` is `Some`, the head block pointer is set and the
+/// commit is fully self-contained. Pass `None` to flush state without
+/// advancing head_block (used in hybrid mode where a second commit
+/// applies system-tx state diffs and sets head_block).
+fn flush_cache_to_db(
+    db: &StateDb,
+    cache_db: &CacheDB<&StateDb>,
+    block_number: Option<u64>,
+) -> Result<()> {
     let batch = db.write_batch()?;
 
     for (address, cached_account) in &cache_db.cache.accounts {
@@ -294,7 +326,9 @@ fn flush_cache_to_db(db: &StateDb, cache_db: &CacheDB<&StateDb>, block_number: u
         }
     }
 
-    batch.set_head_block(block_number)?;
+    if let Some(n) = block_number {
+        batch.set_head_block(n)?;
+    }
     batch.commit()?;
 
     Ok(())

@@ -157,7 +157,8 @@ async fn update_fixture() {
     let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(
         evm_state_sqd_fetcher::DEFAULT_PORTAL,
         evm_state_sqd_fetcher::POLYGON_DATASET,
-    );
+    )
+    .with_state_diffs(true);
 
     let mut stream = std::pin::pin!(fetcher.stream_blocks(from, Some(to)));
 

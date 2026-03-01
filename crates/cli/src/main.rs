@@ -348,11 +348,6 @@ async fn run_replay(
     let start_block = from.or(head.map(|h| h + 1)).unwrap_or(0);
 
     let use_state_diffs = chain_spec.requires_state_diffs;
-    let mode_label = if use_state_diffs {
-        "state-diffs"
-    } else {
-        "replay"
-    };
     let chain_spec_name = chain_spec.name;
 
     let fetcher = evm_state_sqd_fetcher::SqdFetcher::new(&portal_url, &dataset_name)
@@ -371,18 +366,14 @@ async fn run_replay(
 
     let blocks = fetcher.stream_blocks(start_block, to);
 
-    let pipeline_mode = if use_state_diffs {
-        evm_state_replayer::pipeline::PipelineMode::StateDiffs
-    } else {
-        evm_state_replayer::pipeline::PipelineMode::Replay(chain_spec)
-    };
+    let pipeline_mode = evm_state_replayer::pipeline::PipelineMode::Replay(chain_spec);
 
     if plain {
         // ── Plain text logging ──────────────────────────────────────
         info!(
             chain = chain_spec_name,
             chain_id = resolved.chain_id,
-            mode = mode_label,
+            mode = "replay",
             from = start_block,
             to = %target_label,
             "starting replay"
@@ -451,7 +442,7 @@ async fn run_replay(
         eprintln!();
         eprintln!(
             "  chain: \x1b[1m{}\x1b[0m ({})  mode: \x1b[1m{}\x1b[0m",
-            chain_spec_name, resolved.chain_id, mode_label
+            chain_spec_name, resolved.chain_id, "replay"
         );
         eprintln!(
             "  from block \x1b[1m{}\x1b[0m to \x1b[1m{}\x1b[0m",

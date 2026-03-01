@@ -64,9 +64,36 @@ fn build_query(from: u64, to: Option<u64>, state_diffs: bool) -> serde_json::Val
     });
 
     if state_diffs {
-        query["stateDiffs"] = json!([{}]);
-        query["fields"]["stateDiff"] = json!({
+        // Hybrid mode: fetch all transactions for EVM replay, plus state
+        // diffs only for system transactions (from=0x0, e.g. Polygon Bor
+        // state sync). This avoids downloading diffs for every transaction.
+        query["transactions"] = json!([
+            {},
+            {"from": ["0x0000000000000000000000000000000000000000"], "stateDiffs": true}
+        ]);
+        query["fields"]["transaction"] = json!({
             "transactionIndex": true,
+            "hash": true,
+            "from": true,
+            "to": true,
+            "input": true,
+            "value": true,
+            "nonce": true,
+            "gas": true,
+            "gasPrice": true,
+            "maxFeePerGas": true,
+            "maxPriorityFeePerGas": true,
+            "yParity": true,
+            "chainId": true,
+            "gasUsed": true,
+            "cumulativeGasUsed": true,
+            "effectiveGasPrice": true,
+            "contractAddress": true,
+            "type": true,
+            "status": true,
+            "sighash": true
+        });
+        query["fields"]["stateDiff"] = json!({
             "address": true,
             "key": true,
             "kind": true,
@@ -409,13 +436,21 @@ mod tests {
     fn build_query_state_diffs_mode() {
         let query = build_query(100, None, true);
         assert_eq!(query["type"], "evm");
-        assert!(query["stateDiffs"].is_array());
-        assert!(query.get("transactions").is_none());
+        // Hybrid mode: transactions array with two filters
+        let txs = query["transactions"].as_array().unwrap();
+        assert_eq!(txs.len(), 2);
+        assert_eq!(txs[0], json!({})); // all transactions
+        assert_eq!(
+            txs[1]["from"],
+            json!(["0x0000000000000000000000000000000000000000"])
+        );
+        assert_eq!(txs[1]["stateDiffs"], json!(true));
+        // Both transaction and stateDiff fields present
+        assert!(query["fields"]["transaction"]["from"].as_bool().unwrap());
         assert!(query["fields"]["stateDiff"]["address"].as_bool().unwrap());
         assert!(query["fields"]["stateDiff"]["key"].as_bool().unwrap());
         assert!(query["fields"]["stateDiff"]["kind"].as_bool().unwrap());
         assert!(query["fields"]["stateDiff"]["next"].as_bool().unwrap());
-        assert!(query["fields"].get("transaction").is_none());
     }
 
     #[test]
